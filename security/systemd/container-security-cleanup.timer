@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Container Security Monitor retention cleanup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=20m
+Unit=container-security-cleanup.service
+
+[Install]
+WantedBy=timers.target

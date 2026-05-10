@@ -1,0 +1,16 @@
+[Unit]
+Description=Container Security Monitor scan
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/security
+Environment=SECURITY_ROOT=/opt/security
+ExecStart=/opt/security/scanner/scan_remote_hosts.sh
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+

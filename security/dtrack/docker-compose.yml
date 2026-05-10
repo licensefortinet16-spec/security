@@ -1,0 +1,87 @@
+services:
+  trivy:
+    image: aquasec/trivy:0.70.0
+    container_name: dtrack-trivy
+    network_mode: host
+    command:
+      - server
+      - --listen
+      - :8082
+      - --token
+      - trivy-local-token-20260510
+    volumes:
+      - trivy-cache:/root/.cache/trivy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: dtrack-postgres
+    network_mode: host
+    environment:
+      POSTGRES_DB: dtrack
+      POSTGRES_USER: dtrack
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - dtrack-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dtrack -d dtrack"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  dtrack-apiserver:
+    image: dependencytrack/apiserver:latest
+    container_name: dtrack-apiserver
+    network_mode: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        exec java $${JAVA_OPTIONS} $${EXTRA_JAVA_OPTIONS}
+        --add-opens java.base/java.util.concurrent=ALL-UNNAMED
+        --sun-misc-unsafe-memory-access=allow
+        -Dlogback.configurationFile=$${LOGGING_CONFIG_PATH}
+        -DdependencyTrack.logging.level=$${LOGGING_LEVEL}
+        -jar $${WAR_FILENAME}
+        -context $${CONTEXT}
+        -port 8081
+    environment:
+      ALPINE_DATABASE_MODE: external
+      ALPINE_DATABASE_URL: jdbc:postgresql://127.0.0.1:5432/dtrack
+      ALPINE_DATABASE_DRIVER: org.postgresql.Driver
+      ALPINE_DATABASE_USERNAME: dtrack
+      ALPINE_DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+      ALPINE_DATABASE_POOL_ENABLED: "true"
+      ALPINE_DATABASE_POOL_MAX_SIZE: "10"
+      ALPINE_DATABASE_POOL_MIN_IDLE: "2"
+      ALPINE_METRICS_ENABLED: "true"
+      LOGGING_LEVEL: INFO
+      EXTRA_JAVA_OPTIONS: "-Xms512m -Xmx1200m"
+    volumes:
+      - dtrack-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://192.168.1.22:8081/api/version >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 10
+    restart: unless-stopped
+
+  dtrack-frontend:
+    image: dependencytrack/frontend:latest
+    container_name: dtrack-frontend
+    network_mode: host
+    depends_on:
+      - dtrack-apiserver
+    environment:
+      API_BASE_URL: http://192.168.1.22:8081
+    restart: unless-stopped
+
+volumes:
+  dtrack-data:
+  dtrack-postgres:
+  trivy-cache:

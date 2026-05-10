@@ -1,0 +1,10 @@
+[Unit]
+Description=Container Security Monitor retention cleanup
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/security
+Environment=SECURITY_ROOT=/opt/security
+ExecStart=/usr/bin/python3 /opt/security/scanner/cleanup_retention.py --root /opt/security
+User=root
+Group=root

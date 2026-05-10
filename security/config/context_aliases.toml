@@ -1,0 +1,3 @@
+[aliases]
+openpanel = ["openpanel", "openpanel-default", "openpanel-stack"]
+"docker default" = ["default", "docker default", "standalone", "compose-default"]

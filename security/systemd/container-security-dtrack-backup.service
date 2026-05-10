@@ -1,0 +1,12 @@
+[Unit]
+Description=Dependency-Track PostgreSQL backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/security
+Environment=SECURITY_ROOT=/opt/security
+ExecStart=/opt/security/dtrack/backup_dependency_track.sh
+User=root
+Group=root

@@ -1,0 +1,12 @@
+retention:
+  logs_days: 90
+  reports_days: 365
+  sbom_days: 365
+  trivy_json_days: 180
+  inventory_days: 180
+  history_days: 730
+  metrics_days: 180
+  image_sync_days: 180
+  backups_days: 30
+  tmp_days: 7
+  docker_prune_unused_synced_images: false

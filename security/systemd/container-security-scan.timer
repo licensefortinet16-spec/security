@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekly Container Security Monitor scan
+
+[Timer]
+OnCalendar=Sun *-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=container-security-scan.service
+
+[Install]
+WantedBy=timers.target
+

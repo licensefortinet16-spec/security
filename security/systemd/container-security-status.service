@@ -1,0 +1,19 @@
+[Unit]
+Description=Container Security Monitor status server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/security
+Environment=SECURITY_ROOT=/opt/security
+Environment=SECURITY_STATUS_BIND=192.168.1.22
+Environment=SECURITY_STATUS_PORT=8090
+ExecStart=/usr/bin/python3 /opt/security/server/security_status_server.py
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

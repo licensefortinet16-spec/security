@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Dependency-Track PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=20m
+Unit=container-security-dtrack-backup.service
+
+[Install]
+WantedBy=timers.target

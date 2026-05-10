@@ -1,0 +1,56 @@
+[settings]
+enabled = true
+
+[[rules]]
+id = "critical_vulnerabilities"
+severity = "critical"
+channel = "grafana"
+path = "derived.critical_vulnerabilities"
+operator = "gt"
+threshold = 0
+message = "Existem vulnerabilidades criticas nas imagens analisadas."
+
+[[rules]]
+id = "high_vulnerabilities"
+severity = "warning"
+channel = "grafana"
+path = "derived.high_vulnerabilities"
+operator = "gte"
+threshold = 10
+message = "O volume de vulnerabilidades altas atingiu o limite definido."
+
+[[rules]]
+id = "risk_score_high"
+severity = "warning"
+channel = "grafana"
+path = "derived.max_risk_score"
+operator = "gte"
+threshold = 80
+message = "O score maximo de risco do portfolio atingiu nivel elevado."
+
+[[rules]]
+id = "dtrack_correlation_gap"
+severity = "warning"
+channel = "grafana"
+path = "dtrack_analysis.status"
+operator = "eq"
+threshold = "correlation_gap"
+message = "Dependency-Track ainda nao correlacionou vulnerabilidades para parte dos SBOMs."
+
+[[rules]]
+id = "scan_failure"
+severity = "critical"
+channel = "grafana"
+path = "derived.scan_failed"
+operator = "gt"
+threshold = 0
+message = "Uma ou mais etapas do scan terminaram com falha."
+
+[[rules]]
+id = "dtrack_vulnerable_components"
+severity = "warning"
+channel = "grafana"
+path = "dtrack_analysis.totals.dtrack_vulnerable_components"
+operator = "gt"
+threshold = 0
+message = "O Dependency-Track correlacionou componentes vulneraveis."

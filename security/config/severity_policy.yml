@@ -1,0 +1,24 @@
+sla:
+  critical_with_exploit_hours: 48
+  critical_days: 7
+  high_days: 15
+  medium_days: 30
+  low_days: 90
+
+risk_score:
+  critical_cve: 30
+  high_cve: 15
+  known_exploit: 25
+  internet_exposed: 20
+  privileged_container: 20
+  docker_socket_mounted: 25
+  running_as_root: 10
+  latest_tag: 5
+  old_image: 10
+  no_fix_available: 5
+
+classification:
+  low_max: 30
+  medium_max: 60
+  high_max: 80
+  critical_max: 100

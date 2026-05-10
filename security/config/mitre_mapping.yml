@@ -1,0 +1,28 @@
+rules:
+  - condition: rce
+    tactics:
+      - Initial Access
+      - Execution
+
+  - condition: privilege_escalation
+    tactics:
+      - Privilege Escalation
+
+  - condition: credential_disclosure
+    tactics:
+      - Credential Access
+
+  - condition: docker_socket_mounted
+    tactics:
+      - Privilege Escalation
+      - Defense Evasion
+
+  - condition: privileged_container
+    tactics:
+      - Privilege Escalation
+      - Defense Evasion
+
+  - condition: exposed_service
+    tactics:
+      - Initial Access
+      - Discovery

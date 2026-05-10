@@ -1,0 +1,10 @@
+.env
+*.env
+config/*.env
+output/
+tmp/
+.cache/
+*.log
+__pycache__/
+*.pyc
+dependency-track.env
