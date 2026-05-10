@@ -5,6 +5,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+import re
 
 
 ROOT = Path(os.environ.get("SECURITY_ROOT", "/opt/security"))
@@ -43,8 +44,16 @@ class Handler(BaseHTTPRequestHandler):
             self.file(ROOT / "output" / "metrics" / "container_security_latest.prom", "text/plain; charset=utf-8")
         elif path == "/reports/executive":
             self.file(ROOT / "output" / "reports" / "executive_report_latest.html", "text/html; charset=utf-8")
+        elif path == "/reports/executive.pdf":
+            self.file(ROOT / "output" / "reports" / "executive_report_latest.pdf", "application/pdf")
         elif path == "/reports/technical":
             self.file(ROOT / "output" / "reports" / "technical_report_latest.html", "text/html; charset=utf-8")
+        elif path.startswith("/reports/technical/containers/"):
+            slug = path.rsplit("/", 1)[-1]
+            if not re.fullmatch(r"[a-z0-9-]+", slug or ""):
+                self.send_error(400)
+                return
+            self.file(ROOT / "output" / "reports" / "technical_containers" / f"{slug}_latest.html", "text/html; charset=utf-8")
         else:
             self.send_error(404)
 

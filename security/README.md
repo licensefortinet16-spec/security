@@ -71,8 +71,19 @@ Latest fixed report paths:
 ```text
 /opt/security/output/reports/index.html
 /opt/security/output/reports/executive_report_latest.html
+/opt/security/output/reports/executive_report_latest.pdf
 /opt/security/output/reports/technical_report_latest.html
+/opt/security/output/reports/technical_containers/<container>_latest.html
 /opt/security/output/history/risk_scores_latest.json
+```
+
+Status server report URLs:
+
+```text
+http://192.168.1.22:8090/reports/executive
+http://192.168.1.22:8090/reports/executive.pdf
+http://192.168.1.22:8090/reports/technical
+http://192.168.1.22:8090/reports/technical/containers/<container>
 ```
 
 ## Dependency-Track

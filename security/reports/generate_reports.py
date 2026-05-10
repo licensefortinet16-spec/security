@@ -4,6 +4,7 @@ import csv
 import html
 import json
 import os
+import re
 import shutil
 import sys
 from collections import defaultdict
@@ -73,6 +74,16 @@ def latest(path, pattern, run_id):
 
 def esc(value):
     return html.escape(str(value if value is not None else ""))
+
+
+def slugify(value):
+    text = str(value if value is not None else "unknown").lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    return text.strip("-") or "unknown"
+
+
+def container_slug(row):
+    return slugify(f"{row.get('host_name')}-{row.get('container_name')}-{row.get('image')}")
 
 
 def classify(score):
@@ -268,6 +279,7 @@ def render_executive(run_id, inventory, risk_rows, vuln_summary, dtrack_summary,
             <p class="eyebrow">Container Security Monitor</p>
             <h1>Relatorio Gerencial</h1>
             <p class="muted">Execucao {esc(run_id)} - gerado em {esc(utc_now())}</p>
+            <p class="hero-actions"><a href="/reports/executive.pdf">Exportar PDF</a></p>
           </div>
           <div class="risk-card {esc(status)}">
             <span>Risco geral</span>
@@ -357,15 +369,119 @@ def render_executive(run_id, inventory, risk_rows, vuln_summary, dtrack_summary,
     )
 
 
-def render_technical(run_id, inventory, findings, risk_rows, trivy_summary, vuln_summary, dtrack_summary, dtrack_analysis, context_summary):
+def technical_nav(risk_rows, selected_slug=None):
+    rows = [
+        f'<a class="nav-link {"active" if not selected_slug else ""}" href="/reports/technical">Todos os containers</a>'
+    ]
+    for row in risk_rows:
+        slug = container_slug(row)
+        rows.append(
+            f"""<a class="nav-link {"active" if slug == selected_slug else ""}" href="/reports/technical/containers/{esc(slug)}">
+              <strong>{esc(row.get('container_name'))}</strong>
+              <span>{esc(row.get('context'))} - score {esc(row.get('score'))}</span>
+            </a>"""
+        )
+    return f'<aside class="side-nav"><h2>Containers</h2>{"".join(rows)}</aside>'
+
+
+def filter_container_findings(findings, row):
+    return [
+        item for item in findings
+        if (item.get("host_name") or "unknown") == row.get("host_name")
+        and (item.get("container_name") or "unknown") == row.get("container_name")
+        and (item.get("image") or "unknown") == row.get("image")
+    ]
+
+
+def vulnerability_rows_for_images(vuln_summary, images, limit=250):
+    image_set = set(images)
+    rows = []
+    for row in vuln_summary.get("top_vulnerabilities", []):
+        if row.get("image") not in image_set:
+            continue
+        rows.append(
+            "<tr>"
+            f"<td>{esc(row.get('image'))}</td>"
+            f"<td>{esc(row.get('id'))}</td>"
+            f"<td>{badge(row.get('severity'))}</td>"
+            f"<td>{esc(row.get('package'))}</td>"
+            f"<td>{esc(row.get('installed_version'))}</td>"
+            f"<td>{esc(row.get('fixed_version'))}</td>"
+            f"<td>{esc(row.get('title'))}</td>"
+            "</tr>"
+        )
+        if len(rows) >= limit:
+            break
+    if not rows:
+        return '<tr><td colspan="7" class="muted">Sem vulnerabilidades para o filtro selecionado.</td></tr>'
+    return "".join(rows)
+
+
+def vulnerability_container_index(risk_rows, vuln_summary):
+    by_image = vuln_summary.get("by_image") or {}
+    rows = []
+    for row in risk_rows:
+        vulns = by_image.get(row.get("image"), [])
+        counts = defaultdict(int)
+        for vuln in vulns:
+            counts[vuln.get("Severity") or "UNKNOWN"] += 1
+        rows.append(
+            "<tr>"
+            f"<td><a href=\"/reports/technical/containers/{esc(container_slug(row))}\">{esc(row.get('container_name'))}</a></td>"
+            f"<td>{esc(row.get('context'))}</td>"
+            f"<td>{esc(row.get('image'))}</td>"
+            f"<td>{esc(len(vulns))}</td>"
+            f"<td>{esc(counts.get('CRITICAL', 0))}</td>"
+            f"<td>{esc(counts.get('HIGH', 0))}</td>"
+            f"<td>{esc(row.get('score'))}</td>"
+            "</tr>"
+        )
+    if not rows:
+        return '<p class="muted">Sem containers para listar nesta execucao.</p>'
+    return f"""
+    <div class="table-wrap">
+      <table>
+        <tr><th>Container</th><th>Contexto</th><th>Imagem</th><th>CVEs</th><th>Criticas</th><th>Altas</th><th>Score</th></tr>
+        {''.join(rows)}
+      </table>
+    </div>
+    """
+
+
+def severity_counts_for_images(vuln_summary, images):
+    counts = {}
+    by_image = vuln_summary.get("by_image") or {}
+    for image in images:
+        for vuln in by_image.get(image, []):
+            severity = vuln.get("Severity") or "UNKNOWN"
+            counts[severity] = counts.get(severity, 0) + 1
+    return counts
+
+
+def finding_types_for_rows(findings):
+    counts = {}
+    for finding in findings:
+        finding_type = finding.get("type") or "unknown"
+        counts[finding_type] = counts.get(finding_type, 0) + 1
+    return counts
+
+
+def render_technical(run_id, inventory, findings, risk_rows, trivy_summary, vuln_summary, dtrack_summary, dtrack_analysis, context_summary, selected_container=None):
     summary = inventory.get("summary", {})
-    severity_counts = vuln_summary.get("severity_counts") or {}
-    finding_types = summary.get("findings_by_type") or {}
-    actions = build_priority_actions(risk_rows, vuln_summary, inventory)
-    tactics = top_mitre_tactics(inventory, vuln_summary)
+    selected_slug = container_slug(selected_container) if selected_container else None
+    visible_risk_rows = [selected_container] if selected_container else risk_rows
+    visible_findings = filter_container_findings(findings, selected_container) if selected_container else findings
+    visible_images = [selected_container.get("image")] if selected_container else sorted({row.get("image") for row in risk_rows if row.get("image")})
+    severity_counts = severity_counts_for_images(vuln_summary, visible_images) if selected_container else (vuln_summary.get("severity_counts") or {})
+    finding_types = finding_types_for_rows(visible_findings) if selected_container else (summary.get("findings_by_type") or {})
+    visible_context_summary = summarize_context(visible_risk_rows) if selected_container else context_summary
+    visible_vuln_summary = dict(vuln_summary)
+    visible_vuln_summary["severity_counts"] = severity_counts
+    actions = build_priority_actions(visible_risk_rows, visible_vuln_summary, inventory)
+    tactics = top_mitre_tactics({"hosts": [{"findings": visible_findings}], "summary": summary}, visible_vuln_summary) if selected_container else top_mitre_tactics(inventory, vuln_summary)
 
     finding_rows = []
-    for finding in findings:
+    for finding in visible_findings:
         finding_rows.append(
             "<tr>"
             f"<td>{esc(finding.get('host_name'))}</td>"
@@ -376,9 +492,11 @@ def render_technical(run_id, inventory, findings, risk_rows, trivy_summary, vuln
             f"<td>{esc(finding.get('recommendation'))}</td>"
             "</tr>"
         )
+    if not finding_rows:
+        finding_rows.append('<tr><td colspan="6" class="muted">Sem achados de configuracao para o filtro selecionado.</td></tr>')
 
     risk_rows_html = []
-    for row in risk_rows:
+    for row in visible_risk_rows:
         risk_rows_html.append(
             "<tr>"
             f"<td>{esc(row['host_name'])}</td>"
@@ -390,22 +508,12 @@ def render_technical(run_id, inventory, findings, risk_rows, trivy_summary, vuln
             "</tr>"
         )
 
-    vuln_rows = []
-    for row in vuln_summary.get("top_vulnerabilities", [])[:150]:
-        vuln_rows.append(
-            "<tr>"
-            f"<td>{esc(row.get('image'))}</td>"
-            f"<td>{esc(row.get('id'))}</td>"
-            f"<td>{badge(row.get('severity'))}</td>"
-            f"<td>{esc(row.get('package'))}</td>"
-            f"<td>{esc(row.get('installed_version'))}</td>"
-            f"<td>{esc(row.get('fixed_version'))}</td>"
-            f"<td>{esc(row.get('title'))}</td>"
-            "</tr>"
-        )
+    vuln_rows = vulnerability_rows_for_images(vuln_summary, visible_images, limit=300 if selected_container else 150)
 
     trivy_failures = []
     for item in (trivy_summary or {}).get("results", []):
+        if selected_container and item.get("image") not in visible_images:
+            continue
         if item.get("status") != "success":
             trivy_failures.append(
                 "<tr>"
@@ -418,6 +526,8 @@ def render_technical(run_id, inventory, findings, risk_rows, trivy_summary, vuln
 
     dtrack_rows = []
     for item in (dtrack_summary or {}).get("results", []):
+        if selected_container and item.get("image") not in visible_images:
+            continue
         dtrack_rows.append(
             "<tr>"
             f"<td>{esc(item.get('image'))}</td>"
@@ -427,25 +537,36 @@ def render_technical(run_id, inventory, findings, risk_rows, trivy_summary, vuln
             "</tr>"
         )
 
-    return base_html(
-        "Relatorio Tecnico - Container Security Monitor",
-        f"""
+    scope_title = f" - {selected_container.get('container_name')}" if selected_container else ""
+    scope_kpis = ""
+    if selected_container:
+        scope_kpis = f"""
+          {kpi("Contexto", selected_container.get("context"), "origem")}
+          {kpi("Score", selected_container.get("score"), selected_container.get("classification"))}
+          {kpi("Achados", selected_container.get("findings"), "container")}
+        """
+
+    content = f"""
+    <div class="technical-layout">
+      {technical_nav(risk_rows, selected_slug)}
+      <main class="technical-main">
         <section class="hero compact">
           <div>
             <p class="eyebrow">Container Security Monitor</p>
-            <h1>Relatorio Tecnico</h1>
+            <h1>Relatorio Tecnico{esc(scope_title)}</h1>
             <p class="muted">Execucao {esc(run_id)} - inventario {esc(inventory.get('status'))}</p>
           </div>
         </section>
 
-        <section class="kpis">
+        <section class="kpis inline">
           {kpi("Hosts", f"{summary.get('hosts_success', 0)}/{summary.get('hosts_total', 0)}", "OK")}
-          {kpi("Containers", summary.get("containers_total", 0), "Docker")}
-          {kpi("Imagens", summary.get("images_total", 0), "unicas")}
-          {kpi("Achados", summary.get("findings_total", 0), "config")}
-          {kpi("CVEs", vuln_summary.get("total", 0), "Trivy")}
+          {kpi("Containers", len(visible_risk_rows) if selected_container else summary.get("containers_total", 0), "Docker")}
+          {kpi("Imagens", len(visible_images), "unicas")}
+          {kpi("Achados", len(visible_findings) if selected_container else summary.get("findings_total", 0), "config")}
+          {kpi("CVEs", len((vuln_summary.get("by_image") or {}).get(selected_container.get("image"), [])) if selected_container else vuln_summary.get("total", 0), "Trivy")}
           {kpi("SBOM upload", (dtrack_summary or {}).get("uploaded", 0), "Dependency-Track")}
           {kpi("DT CVEs", ((dtrack_analysis or {}).get("totals") or {}).get("dtrack_vulnerabilities", 0), "correlacionadas")}
+          {scope_kpis}
         </section>
 
         {dtrack_correlation_notice(vuln_summary, dtrack_analysis)}
@@ -462,8 +583,13 @@ def render_technical(run_id, inventory, findings, risk_rows, trivy_summary, vuln
         </section>
 
         <section class="panel">
+          <h2>Vulnerabilidades por Container</h2>
+          {vulnerability_container_index(visible_risk_rows, vuln_summary)}
+        </section>
+
+        <section class="panel">
           <h2>Contextos Prioritarios</h2>
-          {context_table(context_summary[:8])}
+          {context_table(visible_context_summary[:8])}
         </section>
 
         <section class="panel">
@@ -493,7 +619,7 @@ def render_technical(run_id, inventory, findings, risk_rows, trivy_summary, vuln
           <div class="table-wrap">
             <table>
               <tr><th>Imagem</th><th>ID</th><th>Severidade</th><th>Pacote</th><th>Instalada</th><th>Corrigida</th><th>Titulo</th></tr>
-              {''.join(vuln_rows)}
+              {vuln_rows}
             </table>
           </div>
         </section>
@@ -527,9 +653,15 @@ def render_technical(run_id, inventory, findings, risk_rows, trivy_summary, vuln
 
         <section class="panel">
           <h2>Correlacao Dependency-Track</h2>
-          {dtrack_project_table(dtrack_analysis)}
+          {dtrack_project_table(dtrack_analysis, visible_images if selected_container else None)}
         </section>
-        """,
+      </main>
+    </div>
+    """
+
+    return base_html(
+        "Relatorio Tecnico - Container Security Monitor",
+        content,
     )
 
 
@@ -605,12 +737,15 @@ def base_html(title, body):
     .hero {{ display: flex; justify-content: space-between; align-items: stretch; gap: 24px; padding: 30px 34px; background: #102a43; color: #fff; }}
     .hero.compact {{ padding: 24px 34px; }}
     .hero h1, .hero .muted, .hero .eyebrow {{ color: #fff; }}
+    .hero-actions {{ margin: 14px 0 0; }}
+    .hero-actions a {{ display: inline-block; background: #ffffff; color: #102a43; text-decoration: none; font-weight: 700; padding: 9px 12px; border-radius: 6px; }}
     .eyebrow {{ text-transform: uppercase; font-size: 12px; font-weight: 700; letter-spacing: 1px; margin: 0 0 8px; }}
     .muted {{ color: var(--muted); }}
     .risk-card {{ min-width: 210px; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.24); border-radius: 8px; padding: 18px; display: grid; gap: 4px; }}
     .risk-card span, .risk-card em {{ color: #d9e2ec; font-style: normal; }}
     .risk-card strong {{ font-size: 34px; }}
     .kpis {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; padding: 20px 34px 0; }}
+    .kpis.inline {{ padding-left: 0; padding-right: 0; }}
     .kpi {{ background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }}
     .kpi span {{ color: var(--muted); font-size: 13px; }}
     .kpi strong {{ display: block; font-size: 28px; margin: 6px 0; }}
@@ -641,6 +776,16 @@ def base_html(title, body):
     .badge.low, .badge.baixo, .badge.success, .badge.uploaded {{ background: var(--low); }}
     .actions {{ display: flex; gap: 12px; flex-wrap: wrap; }}
     .actions a {{ background: #0b5cad; color: #fff; text-decoration: none; padding: 10px 12px; border-radius: 6px; }}
+    .technical-layout {{ display: grid; grid-template-columns: 280px minmax(0, 1fr); min-height: 100vh; }}
+    .technical-main {{ min-width: 0; padding-bottom: 34px; }}
+    .technical-layout .hero, .technical-layout .grid, .technical-layout .panel, .technical-layout .kpis {{ margin-left: 20px; margin-right: 24px; }}
+    .technical-layout .grid {{ padding-left: 20px; padding-right: 24px; }}
+    .side-nav {{ position: sticky; top: 0; align-self: start; height: 100vh; overflow: auto; background: #0b1f33; border-right: 1px solid #17324d; padding: 18px 14px; }}
+    .side-nav h2 {{ color: #fff; font-size: 16px; margin: 0 0 14px; }}
+    .nav-link {{ display: grid; gap: 4px; color: #d9e2ec; text-decoration: none; border: 1px solid transparent; border-radius: 8px; padding: 10px; margin-bottom: 8px; }}
+    .nav-link:hover, .nav-link.active {{ background: #102a43; border-color: #2f80c0; }}
+    .nav-link strong {{ color: #fff; font-size: 13px; overflow-wrap: anywhere; }}
+    .nav-link span {{ color: #bcccdc; font-size: 12px; }}
     .priority {{ margin: 0; padding-left: 22px; }}
     .legend {{ display: flex; gap: 18px; color: var(--muted); font-size: 13px; margin-bottom: 12px; }}
     .legend i {{ display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }}
@@ -656,6 +801,10 @@ def base_html(title, body):
       .hero {{ flex-direction: column; }}
       .grid.two {{ grid-template-columns: 1fr; }}
       .risk-bars .bar-row, .bar-row {{ grid-template-columns: 1fr; }}
+      .technical-layout {{ grid-template-columns: 1fr; }}
+      .side-nav {{ position: static; height: auto; }}
+      .technical-layout .hero, .technical-layout .grid, .technical-layout .panel, .technical-layout .kpis {{ margin-left: 14px; margin-right: 14px; }}
+      .technical-layout .grid {{ padding-left: 14px; padding-right: 14px; }}
     }}
   </style>
 </head>
@@ -719,11 +868,14 @@ def dtrack_correlation_notice(vuln_summary, dtrack_analysis):
     """
 
 
-def dtrack_project_table(dtrack_analysis):
+def dtrack_project_table(dtrack_analysis, images=None):
     if not dtrack_analysis:
         return '<p class="muted">Sem checagem de correlacao nesta execucao.</p>'
+    image_filter = set(images or [])
     rows = []
     for item in dtrack_analysis.get("projects", []) or []:
+        if image_filter and item.get("image") not in image_filter:
+            continue
         metrics = item.get("metrics") or {}
         rows.append(
             "<tr>"
@@ -959,6 +1111,148 @@ def short_run_id(run_id):
     return value[4:8] + " " + value[9:13] if len(value) >= 13 else value
 
 
+def wrap_text(text, width=92):
+    words = str(text if text is not None else "").replace("\n", " ").split()
+    lines = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) > width and current:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def pdf_escape(text):
+    data = str(text if text is not None else "").encode("latin-1", errors="replace")
+    return data.replace(b"\\", b"\\\\").replace(b"(", b"\\(").replace(b")", b"\\)")
+
+
+def write_simple_pdf(path, title, lines):
+    page_width = 595
+    page_height = 842
+    margin_x = 44
+    margin_y = 54
+    line_height = 14
+    max_lines = int((page_height - (margin_y * 2)) / line_height)
+    pages = []
+    current = []
+    for line in lines:
+        wrapped = wrap_text(line)
+        for part in wrapped:
+            if len(current) >= max_lines:
+                pages.append(current)
+                current = []
+            current.append(part)
+    if current:
+        pages.append(current)
+    if not pages:
+        pages = [[]]
+
+    objects = []
+    catalog_id = 1
+    pages_id = 2
+    font_id = 3
+    page_ids = []
+    content_ids = []
+    next_id = 4
+    for _ in pages:
+        page_ids.append(next_id)
+        content_ids.append(next_id + 1)
+        next_id += 2
+
+    objects.append((catalog_id, b"<< /Type /Catalog /Pages 2 0 R >>"))
+    kids = b" ".join([f"{pid} 0 R".encode("ascii") for pid in page_ids])
+    objects.append((pages_id, b"<< /Type /Pages /Kids [" + kids + b"] /Count " + str(len(page_ids)).encode("ascii") + b" >>"))
+    objects.append((font_id, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"))
+
+    for index, page_lines in enumerate(pages):
+        content = bytearray()
+        content.extend(b"BT\n/F1 16 Tf\n")
+        content.extend(f"{margin_x} {page_height - margin_y} Td\n".encode("ascii"))
+        content.extend(b"(" + pdf_escape(title) + b") Tj\n")
+        content.extend(b"/F1 10 Tf\n")
+        content.extend(f"0 -{line_height * 2} Td\n".encode("ascii"))
+        for line in page_lines:
+            content.extend(b"(" + pdf_escape(line) + b") Tj\n")
+            content.extend(f"0 -{line_height} Td\n".encode("ascii"))
+        content.extend(b"ET\n")
+        stream = b"<< /Length " + str(len(content)).encode("ascii") + b" >>\nstream\n" + bytes(content) + b"endstream"
+        objects.append((content_ids[index], stream))
+        page = (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+            b"/Resources << /Font << /F1 3 0 R >> >> "
+            + b"/Contents " + f"{content_ids[index]} 0 R".encode("ascii") + b" >>"
+        )
+        objects.append((page_ids[index], page))
+
+    objects.sort(key=lambda item: item[0])
+    output = bytearray(b"%PDF-1.4\n")
+    offsets = {}
+    for obj_id, body in objects:
+        offsets[obj_id] = len(output)
+        output.extend(f"{obj_id} 0 obj\n".encode("ascii"))
+        output.extend(body)
+        output.extend(b"\nendobj\n")
+    xref = len(output)
+    output.extend(f"xref\n0 {max(offsets) + 1}\n".encode("ascii"))
+    output.extend(b"0000000000 65535 f \n")
+    for obj_id in range(1, max(offsets) + 1):
+        output.extend(f"{offsets[obj_id]:010d} 00000 n \n".encode("ascii"))
+    output.extend(
+        b"trailer\n<< /Size " + str(max(offsets) + 1).encode("ascii") + b" /Root 1 0 R >>\nstartxref\n"
+        + str(xref).encode("ascii") + b"\n%%EOF\n"
+    )
+    path.write_bytes(bytes(output))
+
+
+def executive_pdf_lines(run_id, inventory, risk_rows, vuln_summary, dtrack_summary, dtrack_analysis, context_summary):
+    summary = inventory.get("summary", {})
+    severity_counts = vuln_summary.get("severity_counts") or {}
+    dtrack_totals = (dtrack_analysis or {}).get("totals") or {}
+    max_score = risk_rows[0]["score"] if risk_rows else 0
+    lines = [
+        f"Execucao: {run_id}",
+        f"Gerado em: {utc_now()}",
+        "",
+        "Resumo executivo",
+        f"Risco geral: {classify(max_score).upper()} - score {max_score}/100",
+        f"Hosts analisados: {summary.get('hosts_success', 0)}/{summary.get('hosts_total', 0)}",
+        f"Containers inventariados: {summary.get('containers_total', 0)}",
+        f"Imagens em uso: {summary.get('images_total', 0)}",
+        f"Vulnerabilidades Trivy: {vuln_summary.get('total', 0)}",
+        f"Dependency-Track correlacionadas: {dtrack_totals.get('dtrack_vulnerabilities', 0)}",
+        "",
+        "Vulnerabilidades por severidade",
+    ]
+    for severity in SEVERITY_ORDER:
+        lines.append(f"- {severity}: {severity_counts.get(severity, 0)}")
+    lines.extend(["", "Contextos prioritarios"])
+    for row in context_summary[:8]:
+        lines.append(
+            f"- {row.get('context')}: score max {row.get('score_max')}, containers {row.get('containers')}, achados {row.get('findings')}"
+        )
+    lines.extend(["", "Top containers por risco"])
+    for row in risk_rows[:10]:
+        lines.append(
+            f"- {row.get('container_name')} ({row.get('context')}): score {row.get('score')}, imagem {row.get('image')}"
+        )
+    lines.extend([
+        "",
+        "Prioridade recomendada",
+        "1. Tratar containers com score 100 e CVEs criticas.",
+        "2. Substituir tags latest por versoes fixas.",
+        "3. Remover execucao como root quando possivel.",
+        "4. Definir limites de CPU/memoria e healthchecks.",
+        "5. Disponibilizar imagens privadas ao scanner central via registry.",
+    ])
+    return lines
+
+
 def load_trend(root):
     rows = []
     for path in sorted((root / "output" / "history").glob("risk_scores_*.json")):
@@ -1042,15 +1336,43 @@ def main():
     risk_path = history_dir / f"risk_scores_{args.run_id}.json"
     technical_path = reports_dir / f"technical_report_{args.run_id}.html"
     executive_path = reports_dir / f"executive_report_{args.run_id}.html"
+    executive_pdf_path = reports_dir / f"executive_report_{args.run_id}.pdf"
     actions = build_priority_actions(risk_rows, vuln_summary, inventory)
 
     risk_path.write_text(json.dumps(risk_output, indent=2, sort_keys=True), encoding="utf-8")
     technical_path.write_text(render_technical(args.run_id, inventory, findings, risk_rows, trivy_summary, vuln_summary, dtrack_summary, dtrack_analysis, context_summary), encoding="utf-8")
     executive_path.write_text(render_executive(args.run_id, inventory, risk_rows, vuln_summary, dtrack_summary, dtrack_analysis, trivy_summary, trend_rows, context_summary, context_trend), encoding="utf-8")
+    write_simple_pdf(
+        executive_pdf_path,
+        "Relatorio Gerencial - Container Security Monitor",
+        executive_pdf_lines(args.run_id, inventory, risk_rows, vuln_summary, dtrack_summary, dtrack_analysis, context_summary),
+    )
+
+    container_reports_dir = reports_dir / "technical_containers"
+    container_reports_dir.mkdir(parents=True, exist_ok=True)
+    for row in risk_rows:
+        slug = container_slug(row)
+        container_path = container_reports_dir / f"{slug}_{args.run_id}.html"
+        latest_container_path = container_reports_dir / f"{slug}_latest.html"
+        content = render_technical(
+            args.run_id,
+            inventory,
+            findings,
+            risk_rows,
+            trivy_summary,
+            vuln_summary,
+            dtrack_summary,
+            dtrack_analysis,
+            context_summary,
+            selected_container=row,
+        )
+        container_path.write_text(content, encoding="utf-8")
+        latest_container_path.write_text(content, encoding="utf-8")
 
     shutil.copyfile(risk_path, history_dir / "risk_scores_latest.json")
     shutil.copyfile(technical_path, reports_dir / "technical_report_latest.html")
     shutil.copyfile(executive_path, reports_dir / "executive_report_latest.html")
+    shutil.copyfile(executive_pdf_path, reports_dir / "executive_report_latest.pdf")
     (reports_dir / "index.html").write_text(render_index(args.run_id, inventory, risk_rows, vuln_summary, dtrack_summary, dtrack_analysis, trend_rows), encoding="utf-8")
     write_priorities(reports_dir / f"priorities_{args.run_id}.csv", actions)
     write_priorities(reports_dir / "priorities_latest.csv", actions)
