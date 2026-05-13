@@ -53,7 +53,7 @@ cd /opt/security/security
 python3 ./scanner/trivy_code_scan.py --root /opt/security/security
 ```
 
-The code scan copies each discovered client path to the central server and runs Semgrep plus lightweight PHP checks for source findings. Trivy is limited to `secret,misconfig` in this flow, so dependency CVEs from lockfiles do not populate the code report.
+The code scan copies each discovered client path to the central server and runs Semgrep plus lightweight PHP checks for source findings. Trivy is limited to `secret,misconfig` in this flow, so dependency CVEs from lockfiles do not populate the code report. Legacy or inactive directories are excluded through `config/code_scan.toml`; the default list includes `_sem-uso`, `site_old`, `old`, backups, logs, caches, `vendor` and `node_modules`.
 
 Status server:
 
@@ -154,7 +154,7 @@ The authenticated settings page controls the scan timer:
 http://200.160.19.14:8090/settings
 ```
 
-The page writes `/opt/security/security/config/scan_schedule.json` and updates `/etc/systemd/system/container-security-scan.timer`. The timer uses the central server's local timezone. The current default is daily at 22:00:
+The page writes `/opt/security/security/config/scan_schedule.json` and updates `/etc/systemd/system/container-security-scan.timer`. It also exposes the SAST exclusion list from `/opt/security/security/config/code_scan.toml` and the tail of the latest scan log. The timer uses the central server's local timezone. The current default is daily at 22:00:
 
 ```text
 OnCalendar=*-*-* 22:00:00
@@ -172,6 +172,13 @@ Check the effective schedule with:
 ```bash
 timedatectl
 systemctl list-timers --all | grep container-security
+```
+
+Run the unit checks after changing scheduling, reporting or SAST filtering logic:
+
+```bash
+cd /opt/security/security
+python3 -m unittest discover -s tests
 ```
 
 Install the status server:

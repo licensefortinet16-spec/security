@@ -13,6 +13,20 @@ from pathlib import Path
 
 SSH_IDENTITY_FILE = Path(os.environ.get("SECURITY_SSH_IDENTITY_FILE", "/root/.ssh/id_ed25519"))
 SSH_KNOWN_HOSTS_FILE = Path(os.environ.get("SECURITY_SSH_KNOWN_HOSTS_FILE", "/opt/security/security/output/ssh/known_hosts"))
+DEFAULT_CODE_EXCLUDE_DIRS = [
+    ".git",
+    ".cache",
+    "node_modules",
+    "vendor",
+    "tmp",
+    "logs",
+    "log",
+    "backup",
+    "backups",
+    "_sem-uso",
+    "site_old",
+    "old",
+]
 
 
 def utc_now():
@@ -97,15 +111,14 @@ def choose_scan_path(target):
     return target["remote_path"]
 
 
-def copy_remote_code(target, destination, timeout):
+def copy_remote_code(target, destination, timeout, exclude_dirs):
     destination.mkdir(parents=True, exist_ok=True)
     scan_path = target["scan_path"].rstrip("/")
     parent = str(Path(scan_path).parent)
     leaf = Path(scan_path).name
     tar_cmd = (
         "tar -h "
-        "--exclude=.git --exclude=node_modules --exclude=vendor --exclude=.cache "
-        "--exclude=tmp --exclude=logs --exclude=log --exclude=backup --exclude=backups "
+        f"{tar_exclude_args(exclude_dirs)} "
         "--exclude='*.sql' --exclude='*.tar' --exclude='*.tar.gz' --exclude='*.zip' "
         f"-C {sh_quote(parent)} -cf - {sh_quote(leaf)}"
     )
@@ -147,7 +160,21 @@ def sh_quote(value):
     return "'" + str(value).replace("'", "'\"'\"'") + "'"
 
 
-def run_trivy_code(root, run_id, target, local_path, timeout):
+def tar_exclude_args(exclude_dirs):
+    args = []
+    for item in sorted(set(exclude_dirs or [])):
+        if not item or "/" in item or item in {".", ".."}:
+            continue
+        args.append(f"--exclude={sh_quote(item)}")
+        args.append(f"--exclude={sh_quote('*/' + item)}")
+    return " ".join(args)
+
+
+def trivy_skip_dirs(exclude_dirs):
+    return ",".join(item for item in exclude_dirs or [] if item and "/" not in item)
+
+
+def run_trivy_code(root, run_id, target, local_path, timeout, exclude_dirs):
     out_dir = root / "output" / "code"
     cache_dir = root / ".cache" / "trivy"
     tmp_dir = root / "tmp" / "trivy-code"
@@ -165,7 +192,7 @@ def run_trivy_code(root, run_id, target, local_path, timeout):
         "--scanners",
         "secret,misconfig",
         "--skip-dirs",
-        ".git,node_modules,vendor,.cache,tmp,logs,log,backup,backups",
+        trivy_skip_dirs(exclude_dirs),
         "--format",
         "json",
         "--output",
@@ -185,7 +212,7 @@ def run_trivy_code(root, run_id, target, local_path, timeout):
     summary = summarize_trivy_output(output_path, Path(local_path), target["scan_path"])
     semgrep_status = merge_source_findings(
         summary,
-        scan_source_findings(root, Path(local_path), target["scan_path"], target["client"], timeout),
+        scan_source_findings(root, Path(local_path), target["scan_path"], target["client"], timeout, exclude_dirs),
     )
     allowlist = load_code_allowlist(root)
     severity_policy = load_code_severity_policy(root)
@@ -295,9 +322,9 @@ def merge_source_findings(summary, findings):
     return semgrep_status
 
 
-def scan_source_findings(root, local_path, remote_scan_path, client, timeout):
+def scan_source_findings(root, local_path, remote_scan_path, client, timeout, exclude_dirs):
     findings = []
-    semgrep = run_semgrep(root, local_path, remote_scan_path, client, timeout)
+    semgrep = run_semgrep(root, local_path, remote_scan_path, client, timeout, exclude_dirs)
     findings.extend(semgrep.get("findings", []))
     if not semgrep.get("findings"):
         semgrep["fallback_used"] = True
@@ -305,7 +332,7 @@ def scan_source_findings(root, local_path, remote_scan_path, client, timeout):
     else:
         semgrep["fallback_used"] = False
     for path in sorted(local_path.rglob("*.php")):
-        if is_ignored_source_path(path, local_path):
+        if is_ignored_source_path(path, local_path, exclude_dirs):
             continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -318,7 +345,7 @@ def scan_source_findings(root, local_path, remote_scan_path, client, timeout):
     return semgrep
 
 
-def run_semgrep(root, local_path, remote_scan_path, client, timeout):
+def run_semgrep(root, local_path, remote_scan_path, client, timeout, exclude_dirs):
     semgrep_bin = shutil.which("semgrep")
     if not semgrep_bin:
         return {"semgrep_status": "not_installed", "findings": []}
@@ -333,8 +360,11 @@ def run_semgrep(root, local_path, remote_scan_path, client, timeout):
         "--json",
         "--metrics=off",
         "--no-git-ignore",
-        str(local_path),
     ]
+    for item in exclude_dirs or []:
+        if item and "/" not in item:
+            cmd.extend(["--exclude", item])
+    cmd.append(str(local_path))
     result = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
     output_path.write_text(result.stdout or "{}", encoding="utf-8")
     if result.returncode not in (0, 1):
@@ -366,8 +396,8 @@ def run_semgrep(root, local_path, remote_scan_path, client, timeout):
     return {"semgrep_status": "success", "findings": findings}
 
 
-def is_ignored_source_path(path, root):
-    ignored = {".git", "node_modules", "vendor", ".cache", "tmp", "logs", "log", "backup", "backups"}
+def is_ignored_source_path(path, root, exclude_dirs=None):
+    ignored = set(exclude_dirs or DEFAULT_CODE_EXCLUDE_DIRS)
     try:
         parts = path.relative_to(root).parts
     except ValueError:
@@ -445,6 +475,21 @@ def load_toml(path):
         return tomllib.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def normalize_code_exclude_dirs(values):
+    normalized = []
+    for value in values or []:
+        item = str(value or "").strip().strip("/")
+        if item and "/" not in item and item not in normalized:
+            normalized.append(item)
+    return normalized or list(DEFAULT_CODE_EXCLUDE_DIRS)
+
+
+def load_code_scan_config(root):
+    data = load_toml(root / "config" / "code_scan.toml")
+    scan = data.get("scan", {}) if isinstance(data, dict) else {}
+    return {"exclude_dirs": normalize_code_exclude_dirs(scan.get("exclude_dirs", DEFAULT_CODE_EXCLUDE_DIRS))}
 
 
 def load_code_allowlist(root):
@@ -637,7 +682,7 @@ def sanitize(value):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Scan remote client code directories with central Trivy fs.")
+    parser = argparse.ArgumentParser(description="Scan remote client source directories with central SAST checks.")
     parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security/security"))
     parser.add_argument("--run-id", default=os.environ.get("RUN_ID") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     parser.add_argument("--timeout", type=int, default=900)
@@ -656,6 +701,8 @@ def main():
     if inventory.get("status") == "failed":
         print("inventory failed; refusing to overwrite latest code report with empty target list", file=sys.stderr)
         return 2
+    code_scan_config = load_code_scan_config(root)
+    exclude_dirs = code_scan_config["exclude_dirs"]
     work_dir = root / "tmp" / "code-scan" / args.run_id
     output = {
         "run_id": args.run_id,
@@ -698,13 +745,13 @@ def main():
                 output["results"].append(row)
                 continue
             local_root = work_dir / safe_name(target["client"])
-            copied = copy_remote_code(target, local_root, args.timeout)
+            copied = copy_remote_code(target, local_root, args.timeout, exclude_dirs)
             if copied.get("status") != "copied":
                 row.update(copied)
                 output["failed"] += 1
                 output["results"].append(row)
                 continue
-            scanned = run_trivy_code(root, args.run_id, target, copied["local_path"], args.timeout)
+            scanned = run_trivy_code(root, args.run_id, target, copied["local_path"], args.timeout, exclude_dirs)
             row.update(scanned)
             if scanned.get("status") == "success":
                 output["success"] += 1

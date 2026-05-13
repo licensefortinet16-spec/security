@@ -37,3 +37,77 @@ rules:
               require $_POST[$K];
           - pattern: |
               require $_REQUEST[$K];
+
+  - id: php.command-injection.user-controlled-command
+    languages:
+      - php
+    severity: ERROR
+    message: "Possivel command injection: comando do sistema recebe entrada controlada pelo usuario."
+    metadata:
+      category: command-injection
+      remediation: "Evitar chamadas shell com entrada do usuario; usar APIs sem shell, lista permitida de comandos e escapeshellarg apenas como defesa adicional."
+    patterns:
+      - pattern-either:
+          - pattern: system($_GET[$K]);
+          - pattern: system($_POST[$K]);
+          - pattern: system($_REQUEST[$K]);
+          - pattern: exec($_GET[$K]);
+          - pattern: exec($_POST[$K]);
+          - pattern: exec($_REQUEST[$K]);
+          - pattern: shell_exec($_GET[$K]);
+          - pattern: shell_exec($_POST[$K]);
+          - pattern: shell_exec($_REQUEST[$K]);
+          - pattern: passthru($_GET[$K]);
+          - pattern: passthru($_POST[$K]);
+          - pattern: passthru($_REQUEST[$K]);
+
+  - id: php.path-traversal.user-controlled-file-read
+    languages:
+      - php
+    severity: ERROR
+    message: "Possivel path traversal: leitura de arquivo usa entrada controlada pelo usuario."
+    metadata:
+      category: path-traversal
+      remediation: "Resolver o caminho com realpath, validar prefixo permitido e bloquear segmentos ../ antes de ler arquivos."
+    patterns:
+      - pattern-either:
+          - pattern: file_get_contents($_GET[$K]);
+          - pattern: file_get_contents($_POST[$K]);
+          - pattern: file_get_contents($_REQUEST[$K]);
+          - pattern: readfile($_GET[$K]);
+          - pattern: readfile($_POST[$K]);
+          - pattern: readfile($_REQUEST[$K]);
+          - pattern: fopen($_GET[$K], ...);
+          - pattern: fopen($_POST[$K], ...);
+          - pattern: fopen($_REQUEST[$K], ...);
+
+  - id: php.sql-injection.request-concat-query
+    languages:
+      - php
+    severity: ERROR
+    message: "Possivel SQL injection: query SQL concatena entrada controlada pelo usuario."
+    metadata:
+      category: sql-injection
+      remediation: "Trocar concatenacao por prepared statements com parametros vinculados e validar tipos antes da consulta."
+    patterns:
+      - pattern-either:
+          - pattern: mysqli_query($CONN, $A . $_GET[$K] . $B);
+          - pattern: mysqli_query($CONN, $A . $_POST[$K] . $B);
+          - pattern: mysqli_query($CONN, $A . $_REQUEST[$K] . $B);
+          - pattern: $PDO->query($A . $_GET[$K] . $B);
+          - pattern: $PDO->query($A . $_POST[$K] . $B);
+          - pattern: $PDO->query($A . $_REQUEST[$K] . $B);
+
+  - id: php.insecure-upload.user-controlled-destination
+    languages:
+      - php
+    severity: WARNING
+    message: "Upload usa destino controlado pelo usuario."
+    metadata:
+      category: insecure-upload
+      remediation: "Gerar nome de arquivo no servidor, validar extensao/MIME e armazenar fora do webroot quando possivel."
+    patterns:
+      - pattern-either:
+          - pattern: move_uploaded_file($_FILES[$F]["tmp_name"], $_POST[$K]);
+          - pattern: move_uploaded_file($_FILES[$F]["tmp_name"], $_GET[$K]);
+          - pattern: move_uploaded_file($_FILES[$F]["tmp_name"], $_REQUEST[$K]);

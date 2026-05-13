@@ -1,0 +1,15 @@
+[scan]
+exclude_dirs = [
+  ".git",
+  ".cache",
+  "node_modules",
+  "vendor",
+  "tmp",
+  "logs",
+  "log",
+  "backup",
+  "backups",
+  "_sem-uso",
+  "site_old",
+  "old",
+]

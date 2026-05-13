@@ -11,6 +11,7 @@ import subprocess
 import secrets
 import time
 import threading
+import tomllib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -31,6 +32,7 @@ SESSION_TTL_SECONDS = int(os.environ.get("SECURITY_STATUS_SESSION_TTL_SECONDS", 
 SCAN_SCRIPT = os.environ.get("SECURITY_SCAN_SCRIPT", str(ROOT / "scanner" / "scan_remote_hosts.sh"))
 SCAN_STATE_FILE = Path(os.environ.get("SECURITY_SCAN_STATE_FILE", str(ROOT / "output" / "scan" / "manual_scan_state.json")))
 SCAN_SCHEDULE_FILE = Path(os.environ.get("SECURITY_SCAN_SCHEDULE_FILE", str(ROOT / "config" / "scan_schedule.json")))
+CODE_SCAN_CONFIG_FILE = Path(os.environ.get("SECURITY_CODE_SCAN_CONFIG_FILE", str(ROOT / "config" / "code_scan.toml")))
 SCAN_TIMER_NAME = os.environ.get("SECURITY_SCAN_TIMER_NAME", "container-security-scan.timer")
 SCAN_SERVICE_NAME = os.environ.get("SECURITY_SCAN_SERVICE_NAME", "container-security-scan.service")
 SCAN_TIMER_PATH = Path(os.environ.get("SECURITY_SCAN_TIMER_PATH", f"/etc/systemd/system/{SCAN_TIMER_NAME}"))
@@ -254,6 +256,103 @@ def save_scan_schedule(schedule, status, message):
     return payload
 
 
+DEFAULT_CODE_EXCLUDE_DIRS = [
+    ".git",
+    ".cache",
+    "node_modules",
+    "vendor",
+    "tmp",
+    "logs",
+    "log",
+    "backup",
+    "backups",
+    "_sem-uso",
+    "site_old",
+    "old",
+]
+
+
+def read_toml(path):
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def parse_exclude_dirs(raw):
+    values = []
+    for item in re.split(r"[,\n]", str(raw or "")):
+        value = item.strip().strip("/")
+        if value and "/" not in value and value not in {".", ".."} and value not in values:
+            values.append(value)
+    return values or list(DEFAULT_CODE_EXCLUDE_DIRS)
+
+
+def load_code_scan_config():
+    data = read_toml(CODE_SCAN_CONFIG_FILE)
+    scan = data.get("scan", {}) if isinstance(data, dict) else {}
+    return {"exclude_dirs": parse_exclude_dirs("\n".join(scan.get("exclude_dirs", DEFAULT_CODE_EXCLUDE_DIRS)))}
+
+
+def toml_string_list(values):
+    rows = ["["]
+    for value in values:
+        rows.append(f'  {json.dumps(str(value))},')
+    rows.append("]")
+    return "\n".join(rows)
+
+
+def save_code_scan_config(config):
+    exclude_dirs = parse_exclude_dirs("\n".join(config.get("exclude_dirs", [])))
+    CODE_SCAN_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CODE_SCAN_CONFIG_FILE.write_text(f"[scan]\nexclude_dirs = {toml_string_list(exclude_dirs)}\n", encoding="utf-8")
+
+
+def latest_scan_log_lines(limit=30):
+    path = latest_file(ROOT / "output" / "logs", "scan_*.log")
+    if not path:
+        return "Nenhum log de scan encontrado."
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]
+    except OSError as exc:
+        return str(exc)
+    body = "\n".join(lines) if lines else "Log vazio."
+    return f"{path.name}\n{body}"
+
+
+def render_code_scan_config_panel(config, query):
+    notice = ""
+    if query.get("code_scan", [""])[0] == "saved":
+        notice = '<div class="empty">Configuracao SAST salva.</div>'
+    elif query.get("code_scan", [""])[0] == "failed":
+        notice = '<div class="empty">Nao foi possivel salvar a configuracao SAST.</div>'
+    values = "\n".join(config.get("exclude_dirs") or [])
+    content = (
+        f"{notice}"
+        '<form method="post" action="/settings/code-scan">'
+        '<div class="table-tools">'
+        '<label>Diretorios excluidos'
+        f'<textarea name="exclude_dirs" rows="8">{esc(values)}</textarea>'
+        '</label>'
+        '<button class="action primary" type="submit">Salvar SAST</button>'
+        '</div>'
+        '</form>'
+    )
+    return section(
+        "SAST",
+        "Diretorios ignorados na copia remota, no Trivy secret/misconfig, no Semgrep e no fallback PHP.",
+        content,
+    )
+
+
+def render_latest_scan_log_panel():
+    return section(
+        "Ultimo log",
+        "Final do log mais recente em output/logs.",
+        f'<pre class="empty" style="white-space: pre-wrap; overflow-x: auto;">{esc(latest_scan_log_lines())}</pre>'
+    )
+
+
 def timer_status_lines():
     commands = [
         ["systemctl", "is-active", SCAN_TIMER_NAME],
@@ -328,6 +427,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_manual_scan()
         elif path == "/settings/schedule":
             self.handle_schedule_update()
+        elif path == "/settings/code-scan":
+            self.handle_code_scan_update()
         else:
             self.send_error(405)
 
@@ -397,7 +498,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("X-Permitted-Cross-Domain-Policies", "none")
 
     def authorized(self):
         if self.valid_session():
@@ -537,6 +642,22 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             save_scan_schedule(schedule, "failed", str(exc))
             location = "/settings?schedule=failed"
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.security_headers()
+        self.end_headers()
+
+    def handle_code_scan_update(self):
+        if not self.authorized():
+            self.redirect_to_login("/settings")
+            return
+        form = self.read_form()
+        exclude_dirs = parse_exclude_dirs(form.get("exclude_dirs", [""])[0])
+        try:
+            save_code_scan_config({"exclude_dirs": exclude_dirs})
+            location = "/settings?code_scan=saved"
+        except Exception:
+            location = "/settings?code_scan=failed"
         self.send_response(302)
         self.send_header("Location", location)
         self.security_headers()
@@ -1289,7 +1410,7 @@ def render_code_pdf():
             f"Acao: {item.get('remediation')}",
             "",
         ])
-    return simple_pdf_bytes("Relatorio de Codigo", lines)
+    return simple_pdf_bytes("Relatorio SAST", lines)
 
 
 def render_code_page(query=None):
@@ -1310,16 +1431,15 @@ def render_code_page(query=None):
     history = code.get("history") or {}
     body = [
         section(
-            "Codigo por cliente",
-            "Scan de codigo/projeto com Trivy fs. Esta visao e separada das imagens de container.",
+            "SAST por cliente",
+            "Scan de codigo/projeto com Semgrep, checks PHP e Trivy restrito a secrets/misconfig. Esta visao e separada das imagens de container.",
             f"""
             <div class="status-strip">
               {pill("Clientes", code.get("clients_total", 0))}
               {pill("Sucesso", code.get("success", 0))}
-              {pill("Vulns", totals.get("vulnerabilities", 0))}
+              {pill("SAST", totals.get("code_findings", 0))}
               {pill("Secrets", totals.get("secrets", 0))}
               {pill("Misconfig", totals.get("misconfigurations", 0))}
-              {pill("Codigo", totals.get("code_findings", 0))}
               {pill("Ignorados", totals.get("suppressed_findings", code.get("suppressed_findings", 0)))}
               {pill("Criticas", severity.get("CRITICAL", 0))}
             </div>
@@ -1359,15 +1479,15 @@ def render_code_page(query=None):
     ]
     return render_shell(
         title="Codigo",
-        eyebrow="Relatorio de codigo",
-        subtitle="Achados de dependencias, secrets e configuracao nos diretorios dos clientes.",
+        eyebrow="Relatorio SAST",
+        subtitle="Achados de codigo, secrets e configuracao nos diretorios ativos dos clientes.",
         cards=[
             ("Run", code.get("run_id") or "aguardando"),
             ("Status", code.get("status") or "aguardando"),
             ("Clientes", code.get("clients_total", 0)),
-            ("Vulns", totals.get("vulnerabilities", 0)),
+            ("SAST", totals.get("code_findings", 0)),
             ("Secrets", totals.get("secrets", 0)),
-            ("Codigo", totals.get("code_findings", 0)),
+            ("Ignorados", totals.get("suppressed_findings", 0)),
             ("Novos", history.get("new", 0)),
         ],
         sections={"dashboard": "", "executive": "", "technical": "", "code": "active"},
@@ -1379,17 +1499,17 @@ def render_code_page(query=None):
 def render_code_clients_table(rows):
     return render_table_panel(
         "Clientes escaneados",
-        ["Cliente", "Host", "Diretorio", "Status", "Vulns", "Secrets", "Misconfig", "Codigo", "Criticas", "Altas"],
+        ["Cliente", "Host", "Diretorio", "Status", "SAST", "Secrets", "Misconfig", "Ignorados", "Criticas", "Altas"],
         rows,
         lambda item: [
             esc(item.get("client")),
             esc(item.get("host_name")),
             f'<span class="cell-sub">{esc(item.get("remote_path"))}</span>',
             esc(item.get("status")),
-            esc(item.get("vulnerabilities", 0)),
+            esc(item.get("code_findings", 0)),
             esc(item.get("secrets", 0)),
             esc(item.get("misconfigurations", 0)),
-            esc(item.get("code_findings", 0)),
+            esc(item.get("suppressed_findings", 0)),
             esc((item.get("severity_counts") or {}).get("CRITICAL", 0)),
             esc((item.get("severity_counts") or {}).get("HIGH", 0)),
         ],
@@ -1995,7 +2115,7 @@ def render_shell(title, eyebrow, subtitle, cards, sections, body_blocks, status_
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }}
-    .table-tools select, .table-tools input {{
+    .table-tools select, .table-tools input, .table-tools textarea {{
       min-width: 160px;
       max-width: min(520px, 100%);
       padding: 10px 12px;
@@ -2622,6 +2742,7 @@ def select_option(value, current, label):
 def render_settings_page(query=None):
     status = status_payload()
     schedule = load_scan_schedule()
+    code_scan_config = load_code_scan_config()
     query = query or {}
     notice = ""
     if query.get("schedule", [""])[0] == "saved":
@@ -2680,6 +2801,8 @@ def render_settings_page(query=None):
             "Estado retornado pelo systemd para o timer de scan.",
             f'<div class="empty"><span class="cell-sub">{timer_html}</span></div>',
         ),
+        render_code_scan_config_panel(code_scan_config, query),
+        render_latest_scan_log_panel(),
         render_manual_scan_panel(manual_scan_state()),
     ]
     return render_shell(
@@ -2693,6 +2816,7 @@ def render_settings_page(query=None):
             ("Run atual", status.get("run_id") or "aguardando"),
             ("Ultima aplicacao", schedule.get("last_apply_status") or "-"),
             ("Mensagem", schedule.get("last_apply_message") or "-"),
+            ("Exclusoes SAST", len(code_scan_config.get("exclude_dirs") or [])),
         ],
         sections={"settings": "active"},
         status_chips=render_status_chips(status),

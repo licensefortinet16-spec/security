@@ -104,8 +104,10 @@ A agenda atual do piloto e diaria as 22:00 no fuso local do servidor central:
 OnCalendar=*-*-* 22:00:00
 ```
 
-O botao de scan manual permanece disponivel na mesma tela para execucao pontual sem alterar a agenda.
+O botao de scan manual permanece disponivel na mesma tela para execucao pontual sem alterar a agenda. A mesma tela tambem exibe o final do log mais recente para facilitar validacao operacional apos uma execucao.
 
 ## 7. Scan de codigo
 
 A visao `/reports/code` representa achados de codigo-fonte e secrets. O fluxo copia os diretorios de clientes para o servidor central e executa Semgrep e verificacoes PHP leves. O Trivy fica restrito a `secret,misconfig` neste fluxo para evitar que CVEs de lockfiles e dependencias sejam confundidas com vulnerabilidades de codigo.
+
+Diretorios legados ou inativos sao filtrados por `/opt/security/security/config/code_scan.toml`. A configuracao padrao exclui `_sem-uso`, `site_old`, `old`, backups, logs, caches, `vendor` e `node_modules`, e a lista pode ser ajustada em `/settings`.
