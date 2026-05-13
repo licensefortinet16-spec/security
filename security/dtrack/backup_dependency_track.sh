@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="${SECURITY_ROOT:-/opt/security}"
+ROOT_DIR="${SECURITY_ROOT:-/opt/security/security}"
 BACKUP_DIR="$ROOT_DIR/output/backups/dependency-track"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="$BACKUP_DIR/dtrack_postgres_$STAMP.sql.gz"

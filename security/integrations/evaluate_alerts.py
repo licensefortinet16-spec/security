@@ -63,16 +63,28 @@ def evaluate_rule(value, operator, threshold):
     threshold = coerce_number(threshold)
 
     if operator == "gt":
+        if value is None or threshold is None:
+            return False
         return value > threshold
     if operator == "gte":
+        if value is None or threshold is None:
+            return False
         return value >= threshold
     if operator == "lt":
+        if value is None or threshold is None:
+            return False
         return value < threshold
     if operator == "lte":
+        if value is None or threshold is None:
+            return False
         return value <= threshold
     if operator == "eq":
+        if value is None or threshold is None:
+            return False
         return value == threshold
     if operator == "ne":
+        if value is None or threshold is None:
+            return False
         return value != threshold
     if operator == "contains":
         if isinstance(value, (list, tuple, set)):
@@ -96,10 +108,19 @@ def build_context(root, run_id):
     dtrack = load_json(latest(root / "output" / "dtrack", "dtrack_upload_{run_id}.json", run_id), {})
     dtrack_analysis = load_json(latest(root / "output" / "dtrack", "dtrack_analysis_{run_id}.json", run_id), {})
     trivy = load_json(latest(root / "output" / "trivy", "trivy_summary_{run_id}.json", run_id), {})
+    code = load_json(latest(root / "output" / "code", "code_summary_{run_id}.json", run_id), {})
 
     scores = risk.get("scores", []) or []
     vuln_summary = risk.get("vulnerability_summary", {}) or {}
     severity_counts = vuln_summary.get("severity_counts", {}) or {}
+    hosts = inventory.get("hosts", []) or []
+    contexts = []
+    for host in hosts:
+        contexts.extend(host.get("contexts", []) or [])
+    unscannable_contexts = [
+        item for item in contexts
+        if item.get("status") not in (None, "", "success")
+    ]
 
     derived = {
         "max_risk_score": max((item.get("score", 0) for item in scores), default=0),
@@ -109,15 +130,23 @@ def build_context(root, run_id):
         "high_vulnerabilities": int(severity_counts.get("HIGH", 0) or 0),
         "medium_vulnerabilities": int(severity_counts.get("MEDIUM", 0) or 0),
         "low_vulnerabilities": int(severity_counts.get("LOW", 0) or 0),
+        "unscannable_contexts": len(unscannable_contexts),
+        "unscannable_context_names": [item.get("name") for item in unscannable_contexts if item.get("name")],
+        "unscannable_context_statuses": [item.get("status") for item in unscannable_contexts if item.get("status")],
         "scan_failed": int(trivy.get("failed", 0) or 0)
         + int(dtrack.get("failed", 0) or 0)
+        + int(code.get("failed", 0) or 0)
         + (1 if inventory.get("status") == "failed" else 0),
+        "code_secrets": int((code.get("totals") or {}).get("secrets", 0) or 0),
+        "code_high_findings": int(((code.get("totals") or {}).get("severity_counts") or {}).get("HIGH", 0) or 0),
+        "code_critical_findings": int(((code.get("totals") or {}).get("severity_counts") or {}).get("CRITICAL", 0) or 0),
     }
 
     return {
         "inventory": inventory,
         "risk": risk,
         "trivy": trivy,
+        "code": code,
         "dtrack": dtrack,
         "dtrack_analysis": dtrack_analysis,
         "derived": derived,
@@ -126,7 +155,7 @@ def build_context(root, run_id):
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate non-blocking security alert rules and export Grafana-friendly state.")
-    parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security"))
+    parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security/security"))
     parser.add_argument("--run-id", default=os.environ.get("RUN_ID") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     args = parser.parse_args()
 

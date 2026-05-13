@@ -2,13 +2,12 @@ services:
   trivy:
     image: aquasec/trivy:0.70.0
     container_name: dtrack-trivy
-    network_mode: host
     command:
       - server
       - --listen
       - :8082
       - --token
-      - trivy-local-token-20260510
+      - ${TRIVY_API_TOKEN:?TRIVY_API_TOKEN must be set in .env}
     volumes:
       - trivy-cache:/root/.cache/trivy
     restart: unless-stopped
@@ -16,7 +15,6 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: dtrack-postgres
-    network_mode: host
     environment:
       POSTGRES_DB: dtrack
       POSTGRES_USER: dtrack
@@ -31,9 +29,8 @@ services:
     restart: unless-stopped
 
   dtrack-apiserver:
-    image: dependencytrack/apiserver:latest
+    image: dependencytrack/apiserver@sha256:1ba4f004e1ec4800ec0e0175b0f1cf361a68f6ac3db9274a32d0a47cd4038f51
     container_name: dtrack-apiserver
-    network_mode: host
     depends_on:
       postgres:
         condition: service_healthy
@@ -51,7 +48,7 @@ services:
         -port 8081
     environment:
       ALPINE_DATABASE_MODE: external
-      ALPINE_DATABASE_URL: jdbc:postgresql://127.0.0.1:5432/dtrack
+      ALPINE_DATABASE_URL: jdbc:postgresql://postgres:5432/dtrack
       ALPINE_DATABASE_DRIVER: org.postgresql.Driver
       ALPINE_DATABASE_USERNAME: dtrack
       ALPINE_DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
@@ -64,7 +61,7 @@ services:
     volumes:
       - dtrack-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://192.168.1.22:8081/api/version >/dev/null"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8081/api/version >/dev/null"]
       interval: 30s
       timeout: 10s
       start_period: 90s
@@ -72,13 +69,26 @@ services:
     restart: unless-stopped
 
   dtrack-frontend:
-    image: dependencytrack/frontend:latest
+    image: dependencytrack/frontend@sha256:00560b57a6cfdec3c02a6e02be80fce97029241a9c653e8b83c0b670dff1f3ca
     container_name: dtrack-frontend
-    network_mode: host
     depends_on:
       - dtrack-apiserver
     environment:
-      API_BASE_URL: http://192.168.1.22:8081
+      API_BASE_URL: http://${PUBLIC_HOST:-200.160.19.14}:8080
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+  dtrack-proxy:
+    image: nginx:1.27-alpine
+    container_name: dtrack-proxy
+    depends_on:
+      - dtrack-frontend
+      - dtrack-apiserver
+    ports:
+      - "${PUBLIC_HOST:-200.160.19.14}:8080:8080"
+    volumes:
+      - ./nginx/dtrack.conf:/etc/nginx/conf.d/default.conf:ro
     restart: unless-stopped
 
 volumes:

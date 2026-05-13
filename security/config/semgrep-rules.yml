@@ -1,0 +1,39 @@
+rules:
+  - id: php.lfi.user-controlled-include
+    languages:
+      - php
+    severity: ERROR
+    message: "Possivel Local File Inclusion: include/require usa entrada controlada pelo usuario."
+    metadata:
+      category: lfi
+      remediation: "Validar o parametro contra lista permitida, normalizar com realpath e bloquear ../ antes de include/require."
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $P = $_GET[$K];
+              ...
+              include $X . $P;
+          - pattern: |
+              $P = $_GET[$K] ?? $D;
+              ...
+              include $X . $P;
+          - pattern: |
+              $P = $_POST[$K];
+              ...
+              include $X . $P;
+          - pattern: |
+              $P = $_REQUEST[$K];
+              ...
+              include $X . $P;
+          - pattern: |
+              include $_GET[$K];
+          - pattern: |
+              include $_POST[$K];
+          - pattern: |
+              include $_REQUEST[$K];
+          - pattern: |
+              require $_GET[$K];
+          - pattern: |
+              require $_POST[$K];
+          - pattern: |
+              require $_REQUEST[$K];

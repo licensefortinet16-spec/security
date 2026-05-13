@@ -5,12 +5,19 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/security
-Environment=SECURITY_ROOT=/opt/security
-ExecStart=/opt/security/scanner/scan_remote_hosts.sh
+WorkingDirectory=/opt/security/security
+Environment=SECURITY_ROOT=/opt/security/security
+Environment=SECURITY_SSH_IDENTITY_FILE=/opt/security/security/output/ssh/id_ed25519
+ExecStart=/opt/security/security/scanner/scan_remote_hosts.sh
 User=root
 Group=root
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
-
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true

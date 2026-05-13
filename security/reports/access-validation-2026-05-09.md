@@ -10,19 +10,19 @@ Workspace local:
 
 Servidor central:
 
-- Host: `192.168.1.22`
+- Host: `200.160.19.14`
 - SSH TCP/22 a partir da maquina local: OK
-- Autenticacao `francis@192.168.1.22`: falhou
-- Autenticacao `root@192.168.1.22`: OK
-- Diretorio remoto criado: `/opt/security`
+- Autenticacao `francis@200.160.19.14`: falhou
+- Autenticacao `root@200.160.19.14`: OK
+- Diretorio remoto criado: `/opt/security/security`
 - Permissao aplicada: `750`
 
 Host alvo:
 
-- Host: `192.168.1.30`
+- Host: `200.160.19.2`
 - Ping a partir da maquina local: OK
 - Ping a partir do servidor central: OK
-- SSH via jump host `root@192.168.1.22 -> root@192.168.1.30`: OK
+- SSH via jump host `root@200.160.19.14 -> root@200.160.19.2`: OK
 - Hostname do alvo: `radius`
 - Docker no alvo: OK
 - Trivy no alvo: OK
@@ -68,7 +68,7 @@ Teste a partir do servidor central:
 | docker-compose | Ausente |
 | trivy | Ausente |
 
-## Ferramentas no servidor central `192.168.1.22`
+## Ferramentas no servidor central `200.160.19.14`
 
 | Ferramenta | Status |
 |---|---|
@@ -83,7 +83,7 @@ Teste a partir do servidor central:
 | jq | Ausente |
 | curl | Ausente |
 
-## Ferramentas no alvo `192.168.1.30`
+## Ferramentas no alvo `200.160.19.2`
 
 | Ferramenta | Status |
 |---|---|
@@ -101,4 +101,4 @@ Teste a partir do servidor central:
 
 ## Proximo passo tecnico
 
-Preparar o servidor central com dependencias minimas, criar `config/hosts.yml` apontando para `192.168.1.30` e implementar o primeiro coletor de inventario remoto.
+Preparar o servidor central com dependencias minimas, criar `config/hosts.yml` apontando para `200.160.19.2` e implementar o primeiro coletor de inventario remoto.

@@ -3,7 +3,9 @@ import argparse
 import csv
 import json
 import os
+import shlex
 import re
+import pwd
 import tomllib
 import subprocess
 import sys
@@ -29,6 +31,10 @@ DANGEROUS_CAPS = {
     "DAC_OVERRIDE",
     "ALL",
 }
+
+
+SSH_IDENTITY_FILE = Path(os.environ.get("SECURITY_SSH_IDENTITY_FILE", "/root/.ssh/id_ed25519"))
+SSH_KNOWN_HOSTS_FILE = Path(os.environ.get("SECURITY_SSH_KNOWN_HOSTS_FILE", "/opt/security/security/output/ssh/known_hosts"))
 
 
 def utc_now():
@@ -80,6 +86,7 @@ def parse_key_value(item):
 def run_ssh(host, command, timeout=60):
     user = host.get("ssh_user", "root")
     ip = host["ip"]
+    SSH_KNOWN_HOSTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     ssh_cmd = [
         "ssh",
         "-o",
@@ -87,11 +94,193 @@ def run_ssh(host, command, timeout=60):
         "-o",
         "ConnectTimeout=8",
         "-o",
+        f"UserKnownHostsFile={SSH_KNOWN_HOSTS_FILE}",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+        "-o",
         "StrictHostKeyChecking=accept-new",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-i",
+        str(SSH_IDENTITY_FILE),
         f"{user}@{ip}",
         command,
     ]
     return subprocess.run(ssh_cmd, text=True, capture_output=True, timeout=timeout)
+
+
+def run_remote_as_user(host, remote_user, command, timeout=60):
+    if not remote_user or remote_user == "root":
+        return run_ssh(host, command, timeout=timeout)
+    wrapped = f"su -s /bin/bash -c {shlex.quote(command)} {shlex.quote(remote_user)}"
+    return run_ssh(host, wrapped, timeout=timeout)
+
+
+def docker_command(context_name, docker_config=None):
+    prefix = "docker"
+    if docker_config:
+        prefix = f"DOCKER_CONFIG={shlex.quote(docker_config)} docker"
+    if not context_name or context_name == "default":
+        return prefix
+    return f"{prefix} --context {shlex.quote(context_name)}"
+
+
+def normalize_docker_host(endpoint_host):
+    if not endpoint_host:
+        return None
+    endpoint_host = str(endpoint_host).strip()
+    if endpoint_host.startswith("unix:///hostfs/"):
+        return "unix:///" + endpoint_host[len("unix:///hostfs/"):]
+    if endpoint_host.startswith("unix://hostfs/"):
+        return "unix:///" + endpoint_host[len("unix://hostfs/"):]
+    return endpoint_host
+
+
+def raw_docker_host(context):
+    return context.get("EndpointHost") or context.get("RawEndpointHost")
+
+
+def owner_from_endpoint(endpoint_host):
+    if not endpoint_host:
+        return None
+    match = re.search(r"/run/user/(\d+)/", endpoint_host)
+    if not match:
+        return None
+    uid = int(match.group(1))
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return None
+
+
+def run_docker_context(host, context_name, command, timeout=60, remote_user=None, docker_config=None):
+    return run_remote_as_user(
+        host,
+        remote_user,
+        f"{docker_command(context_name, docker_config=docker_config)} {command}",
+        timeout=timeout,
+    )
+
+
+def run_docker_host(host, docker_host, command, timeout=60):
+    prefix = f"DOCKER_HOST={shlex.quote(docker_host)} docker"
+    return run_ssh(host, f"{prefix} {command}", timeout=timeout)
+
+
+def socket_path_from_endpoint(endpoint_host):
+    if not endpoint_host:
+        return None
+    endpoint_host = str(endpoint_host).strip()
+    if endpoint_host.startswith("unix://"):
+        path = endpoint_host[len("unix://"):]
+        return path if path.startswith("/") else f"/{path}"
+    return None
+
+
+def ensure_context_daemon(host, owner_user, endpoint_host):
+    socket_path = socket_path_from_endpoint(endpoint_host)
+    if not socket_path:
+        return True, None
+
+    check = run_ssh(host, f"test -S {shlex.quote(socket_path)}", timeout=10)
+    if check.returncode == 0:
+        return True, None
+    return False, f"daemon_absent:{socket_path}"
+
+
+def list_docker_contexts(host):
+    result = run_ssh(host, "docker context ls --format '{{json .}}'", timeout=30)
+    contexts = []
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                contexts.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    if contexts:
+        discovered = [{
+            "Name": item.get("Name") or "default",
+            "Current": bool(item.get("Current")),
+            "ContextType": item.get("ContextType") or "moby",
+            "Owner": "root",
+            "DockerConfig": "/root/.docker",
+            "EndpointHost": normalize_docker_host(item.get("DockerEndpoint") or item.get("DockerHost")),
+            "RawEndpointHost": item.get("DockerEndpoint") or item.get("DockerHost"),
+            "Source": "root",
+            "Error": item.get("Error") or "",
+        } for item in contexts]
+    else:
+        discovered = [{"Name": "default", "Current": True, "ContextType": "moby", "Owner": "root", "DockerConfig": "/root/.docker", "EndpointHost": None, "Source": "root"}]
+
+    discovered.extend(discover_user_docker_contexts(host))
+    unique = {}
+    for item in discovered:
+        key = (item.get("Name") or "default", item.get("EndpointHost") or "")
+        existing = unique.get(key)
+        if not existing:
+            unique[key] = item
+            continue
+        existing_owner = (existing.get("Owner") or "root").strip().lower()
+        current_owner = (item.get("Owner") or "root").strip().lower()
+        if existing_owner == "root" and current_owner != "root":
+            unique[key] = item
+    return list(unique.values())
+
+
+def discover_user_docker_contexts(host):
+    command = r"""python3 - <<'PY'
+import json
+import re
+import pwd
+from pathlib import Path
+
+seen = []
+for entry in pwd.getpwall():
+    home = Path(entry.pw_dir or "")
+    ctx_root = home / ".docker" / "contexts" / "meta"
+    if not ctx_root.exists():
+        continue
+    for meta_path in ctx_root.glob("*/meta.json"):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        name = meta.get("Name") or meta_path.parent.name
+        raw_endpoint = ((meta.get("Endpoints") or {}).get("docker") or {}).get("Host")
+        endpoint = normalize_docker_host(raw_endpoint)
+        if not name:
+            continue
+        owner = entry.pw_name
+        if endpoint:
+            match = re.search(r"/run/user/(\d+)/", endpoint)
+            if match:
+                try:
+                    owner = pwd.getpwuid(int(match.group(1))).pw_name
+                except KeyError:
+                    pass
+        seen.append({
+            "Name": name,
+            "Current": False,
+            "ContextType": meta.get("ContextType") or "moby",
+            "Owner": owner,
+            "DockerConfig": str(home / ".docker"),
+            "EndpointHost": endpoint,
+            "RawEndpointHost": raw_endpoint,
+            "Source": str(meta_path),
+            "Error": "",
+        })
+print(json.dumps(seen))
+PY"""
+    result = run_ssh(host, command, timeout=30)
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return []
 
 
 def safe_name(value):
@@ -105,6 +294,7 @@ def collect_host(host, context_aliases):
         "collected_at": utc_now(),
         "errors": [],
         "docker_version": None,
+        "contexts": [],
         "containers": [],
         "images": [],
         "findings": [],
@@ -121,81 +311,180 @@ def collect_host(host, context_aliases):
         return result
 
     probe_lines = [line for line in probe.stdout.splitlines() if line.strip()]
-    result["remote_hostname"] = probe_lines[0] if probe_lines else None
+    remote_hostname = probe_lines[0] if probe_lines else None
+    if remote_hostname:
+        host = dict(host)
+        host["configured_name"] = host.get("name")
+        host["name"] = remote_hostname
+        result["host"] = host
+    result["remote_hostname"] = remote_hostname
     result["docker_version"] = probe_lines[-1] if probe_lines else None
 
-    ps_command = "docker ps -a --no-trunc --format '{{json .}}'"
-    ps = run_ssh(host, ps_command, timeout=60)
-    if ps.returncode != 0:
-        result["status"] = "inventory_failed"
-        result["errors"].append({
-            "stage": "docker_ps",
-            "returncode": ps.returncode,
-            "stderr": sanitize(ps.stderr),
-        })
-        return result
+    contexts = list_docker_contexts(host)
+    containers = []
+    images = []
+    findings = []
+    context_results = []
+    for context in contexts:
+        context_name = context.get("Name") or "default"
+        context_error = context.get("Error") or ""
+        endpoint_host = normalize_docker_host(context.get("EndpointHost"))
+        owner_user = owner_from_endpoint(endpoint_host) or context.get("Owner") or "root"
+        docker_config = context.get("DockerConfig")
+        docker_prefix = docker_command(context_name, docker_config=docker_config) if not endpoint_host else f"DOCKER_HOST={shlex.quote(endpoint_host)} docker"
+        context_result = {
+            "name": context_name,
+            "description": context.get("Description"),
+            "current": bool(context.get("Current")),
+            "type": context.get("ContextType"),
+            "owner_user": owner_user,
+            "docker_config": docker_config,
+            "endpoint_host": endpoint_host,
+            "raw_endpoint_host": raw_docker_host(context),
+            "source": context.get("Source"),
+            "status": "unknown",
+            "containers": 0,
+            "images": 0,
+            "errors": [],
+        }
 
-    ps_rows = []
-    for line in ps.stdout.splitlines():
-        if not line.strip():
+        if context_error:
+            context_result["status"] = "context_unavailable"
+            context_result["errors"].append({
+                "stage": "docker_context_preflight",
+                "returncode": 1,
+                "stderr": sanitize(context_error),
+            })
+            context_results.append(context_result)
+            result["errors"].extend(context_result["errors"])
             continue
-        try:
-            ps_rows.append(json.loads(line))
-        except json.JSONDecodeError as exc:
-            result["errors"].append({"stage": "docker_ps_parse", "error": str(exc), "line": line[:200]})
 
-    inspect_command = "ids=$(docker ps -aq); if [ -n \"$ids\" ]; then docker inspect $ids; else printf '[]'; fi"
-    inspected = run_ssh(host, inspect_command, timeout=120)
-    if inspected.returncode != 0:
-        result["status"] = "inventory_failed"
-        result["errors"].append({
-            "stage": "docker_inspect",
-            "returncode": inspected.returncode,
-            "stderr": sanitize(inspected.stderr),
-        })
-        return result
+        if endpoint_host:
+            ready, ready_error = ensure_context_daemon(host, owner_user, endpoint_host)
+            if not ready:
+                context_result["status"] = "daemon_absent"
+                context_result["errors"].append({
+                    "stage": "docker_daemon_preflight",
+                    "returncode": 1,
+                    "stderr": ready_error,
+                })
+                context_results.append(context_result)
+                continue
 
-    try:
-        inspect_rows = json.loads(inspected.stdout or "[]")
-    except json.JSONDecodeError as exc:
-        result["status"] = "inventory_failed"
-        result["errors"].append({"stage": "docker_inspect_parse", "error": str(exc)})
-        return result
+        if endpoint_host:
+            ps_command = f"DOCKER_HOST={shlex.quote(endpoint_host)} docker ps -a --no-trunc --format '{{{{json .}}}}'"
+            ps = run_remote_as_user(host, owner_user, ps_command, timeout=60)
+        else:
+            ps = run_docker_context(host, context_name, "ps -a --no-trunc --format '{{json .}}'", timeout=60, remote_user=owner_user, docker_config=docker_config)
+        if ps.returncode != 0:
+            context_result["status"] = "inventory_failed"
+            context_result["errors"].append({
+                "stage": "docker_ps",
+                "returncode": ps.returncode,
+                "stderr": sanitize(ps.stderr),
+            })
+            context_results.append(context_result)
+            result["errors"].extend(context_result["errors"])
+            continue
 
-    image_command = "docker images --digests --no-trunc --format '{{json .}}'"
-    image_rows = []
-    images = run_ssh(host, image_command, timeout=60)
-    if images.returncode == 0:
-        for line in images.stdout.splitlines():
+        ps_rows = []
+        for line in ps.stdout.splitlines():
             if not line.strip():
                 continue
             try:
-                image_rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                result["errors"].append({"stage": "docker_images_parse", "line": line[:200]})
-    else:
-        result["errors"].append({
-            "stage": "docker_images",
-            "returncode": images.returncode,
-            "stderr": sanitize(images.stderr),
-        })
+                ps_rows.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                context_result["errors"].append({"stage": "docker_ps_parse", "error": str(exc), "line": line[:200]})
 
-    ps_by_id = {row.get("ID", "")[:12]: row for row in ps_rows}
-    containers = []
-    findings = []
-    for item in inspect_rows:
-        container = normalize_container(host, item, ps_by_id, context_aliases)
-        containers.append(container)
-        findings.extend(check_container(host, item, container))
+        inspect_command = f"ids=$({docker_prefix} ps -aq); if [ -n \"$ids\" ]; then {docker_prefix} inspect $ids; else printf '[]'; fi"
+        inspected = run_remote_as_user(host, owner_user, inspect_command, timeout=120)
+        if inspected.returncode != 0:
+            context_result["status"] = "inventory_failed"
+            context_result["errors"].append({
+                "stage": "docker_inspect",
+                "returncode": inspected.returncode,
+                "stderr": sanitize(inspected.stderr),
+            })
+            context_results.append(context_result)
+            result["errors"].extend(context_result["errors"])
+            continue
 
+        try:
+            inspect_rows = json.loads(inspected.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            context_result["status"] = "inventory_failed"
+            context_result["errors"].append({"stage": "docker_inspect_parse", "error": str(exc)})
+            context_results.append(context_result)
+            result["errors"].extend(context_result["errors"])
+            continue
+
+        image_command = f"{docker_prefix} images --digests --no-trunc --format '{{{{json .}}}}'"
+        image_rows = []
+        image_result = run_remote_as_user(host, owner_user, image_command, timeout=60)
+        if image_result.returncode == 0:
+            for line in image_result.stdout.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    image_rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    context_result["errors"].append({"stage": "docker_images_parse", "line": line[:200]})
+        else:
+            context_result["errors"].append({
+                "stage": "docker_images",
+                "returncode": image_result.returncode,
+                "stderr": sanitize(image_result.stderr),
+            })
+
+        ps_by_id = {row.get("ID", "")[:12]: row for row in ps_rows}
+        context_containers = []
+        context_findings = []
+        for item in inspect_rows:
+            container = normalize_container(
+                host,
+                item,
+                ps_by_id,
+                context_aliases,
+                collection_context=context_name,
+                collection_owner=owner_user,
+                collection_endpoint_host=endpoint_host,
+            )
+            context_containers.append(container)
+            context_findings.extend(check_container(host, item, container))
+
+        containers.extend(context_containers)
+        findings.extend(context_findings)
+        images.extend(
+            normalize_images(
+                host,
+                image_rows,
+                context_containers,
+                collection_context=context_name,
+                collection_owner=owner_user,
+                collection_endpoint_host=endpoint_host,
+            )
+        )
+        context_result["status"] = "success"
+        context_result["containers"] = len(context_containers)
+        context_result["images"] = len(image_rows)
+        context_results.append(context_result)
+
+    result["contexts"] = context_results
+    result["contexts_total"] = len(context_results)
+    result["contexts_success"] = sum(1 for item in context_results if item.get("status") == "success")
     result["containers"] = containers
-    result["images"] = normalize_images(host, image_rows, containers)
+    result["images"] = images
     result["findings"] = findings
-    result["status"] = "success"
+    if context_results and all(item.get("status") == "success" for item in context_results):
+        result["status"] = "success"
+    elif any(item.get("status") == "success" for item in context_results):
+        result["status"] = "partial_success"
+    else:
+        result["status"] = "scan_failed"
     return result
 
 
-def normalize_container(host, item, ps_by_id, aliases=None):
+def normalize_container(host, item, ps_by_id, aliases=None, collection_context=None, collection_owner=None, collection_endpoint_host=None):
     cid = item.get("Id", "")
     config = item.get("Config") or {}
     host_config = item.get("HostConfig") or {}
@@ -220,8 +509,11 @@ def normalize_container(host, item, ps_by_id, aliases=None):
         "entrypoint": config.get("Entrypoint"),
         "user": config.get("User") or "",
         "labels": labels,
-        "context": resolve_context(host, labels, aliases),
-        "context_source": resolve_context_source(host, labels),
+        "context": resolve_context(host, labels, aliases, collection_context=collection_context),
+        "context_source": resolve_context_source(host, labels, collection_context=collection_context),
+        "docker_context": collection_context or "default",
+        "docker_context_owner": collection_owner or "root",
+        "docker_endpoint_host": collection_endpoint_host,
         "ports": ports,
         "mounts": item.get("Mounts") or [],
         "binds": host_config.get("Binds") or [],
@@ -238,7 +530,7 @@ def normalize_container(host, item, ps_by_id, aliases=None):
     }
 
 
-def resolve_context_source(host, labels):
+def resolve_context_source(host, labels, collection_context=None):
     candidates = (
         "com.docker.compose.project",
         "io.docker.compose.project",
@@ -251,6 +543,8 @@ def resolve_context_source(host, labels):
         value = labels.get(key)
         if value:
             return key
+    if collection_context:
+        return f"docker.context:{collection_context}"
     if host.get("openpanel"):
         return "host.openpanel"
     return "default"
@@ -276,7 +570,7 @@ def normalize_context_value(value):
     return text
 
 
-def resolve_context(host, labels, aliases=None):
+def resolve_context(host, labels, aliases=None, collection_context=None):
     aliases = aliases or {}
     candidates = (
         "com.openpanel.context",
@@ -296,12 +590,20 @@ def resolve_context(host, labels, aliases=None):
             if "openpanel" in normalized:
                 return "openpanel"
             return normalized or "docker default"
+    if collection_context:
+        normalized = normalize_context_value(collection_context)
+        for canonical, values in aliases.items():
+            if normalized == canonical or normalized in values:
+                return canonical
+        if "openpanel" in normalized:
+            return "openpanel"
+        return normalized or "docker default"
     if host.get("openpanel"):
         return "openpanel"
     return "docker default"
 
 
-def normalize_images(host, image_rows, containers):
+def normalize_images(host, image_rows, containers, collection_context=None, collection_owner=None, collection_endpoint_host=None):
     used = {c.get("image") for c in containers if c.get("image")}
     rows = []
     for row in image_rows:
@@ -320,6 +622,10 @@ def normalize_images(host, image_rows, containers):
             "size": row.get("Size"),
             "reference": ref,
             "used_by_containers": ref in used,
+            "context": collection_context or "default",
+            "docker_context": collection_context or "default",
+            "docker_context_owner": collection_owner or "root",
+            "docker_endpoint_host": collection_endpoint_host,
         })
     return rows
 
@@ -329,6 +635,11 @@ def check_container(host, raw, container):
     base = {
         "host_name": host.get("name"),
         "host_ip": host.get("ip"),
+        "context": container.get("context"),
+        "context_source": container.get("context_source"),
+        "docker_context": container.get("docker_context"),
+        "docker_context_owner": container.get("docker_context_owner"),
+        "docker_endpoint_host": container.get("docker_endpoint_host"),
         "container_id": container.get("short_id"),
         "container_name": container.get("name"),
         "image": container.get("image"),
@@ -415,7 +726,7 @@ def write_json(path, data):
 
 
 def write_containers_csv(path, rows):
-    fields = ["host_name", "host_ip", "short_id", "name", "image", "status", "running", "network_mode", "pid_mode", "privileged", "user", "has_healthcheck"]
+    fields = ["host_name", "host_ip", "context", "context_source", "docker_context", "docker_context_owner", "short_id", "name", "image", "status", "running", "network_mode", "pid_mode", "privileged", "user", "has_healthcheck"]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -425,7 +736,7 @@ def write_containers_csv(path, rows):
 
 
 def write_findings_csv(path, rows):
-    fields = ["host_name", "host_ip", "container_id", "container_name", "image", "type", "severity", "evidence", "recommendation"]
+    fields = ["host_name", "host_ip", "context", "context_source", "docker_context", "docker_context_owner", "container_id", "container_name", "image", "type", "severity", "evidence", "recommendation"]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -436,7 +747,7 @@ def write_findings_csv(path, rows):
 
 def main():
     parser = argparse.ArgumentParser(description="Collect Docker inventory from remote hosts through SSH.")
-    parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security"))
+    parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security/security"))
     parser.add_argument("--run-id", default=os.environ.get("RUN_ID") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     args = parser.parse_args()
 
@@ -451,7 +762,7 @@ def main():
     all_containers = []
     all_findings = []
     for host in hosts:
-        print(f"collecting host={host.get('name')} ip={host.get('ip')}", flush=True)
+        print(f"collecting host_ip={host.get('ip')}", flush=True)
         result = collect_host(host, context_aliases)
         all_results.append(result)
         all_containers.extend(result.get("containers", []))
@@ -464,7 +775,9 @@ def main():
         "hosts": all_results,
         "summary": {
             "hosts_total": len(all_results),
-            "hosts_success": sum(1 for r in all_results if r.get("status") == "success"),
+            "hosts_success": sum(1 for r in all_results if r.get("status") in {"success", "partial_success"}),
+            "contexts_total": sum(r.get("contexts_total", 0) for r in all_results),
+            "contexts_success": sum(r.get("contexts_success", 0) for r in all_results),
             "containers_total": len(all_containers),
             "images_total": len({c.get("image") for c in all_containers if c.get("image")}),
             "findings_total": len(all_findings),
@@ -493,7 +806,7 @@ def main():
 def summarize_status(results):
     if not results:
         return "failed"
-    success = sum(1 for r in results if r.get("status") == "success")
+    success = sum(1 for r in results if r.get("status") in {"success", "partial_success"})
     if success == len(results):
         return "success"
     if success > 0:

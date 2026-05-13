@@ -10,12 +10,12 @@ Construir uma plataforma backend-first para monitorar riscos de seguranca em hos
 
 O MVP deve provar o fluxo ponta a ponta em um host piloto:
 
-- Servidor central de trabalho: `192.168.1.22:/opt/security`
-- Host alvo piloto: `192.168.1.30`
+- Servidor central de trabalho: `200.160.19.14:/opt/security/security`
+- Host alvo piloto: `200.160.19.2`
 - Acesso operacional: SSH por chave como `root`
 - Execucao inicial: manual, antes de agendamento via systemd
-- Regra de execucao: scanner, Trivy, Dependency-Track client, score, parsing, relatorios e qualquer processamento rodam somente no servidor central `192.168.1.22`
-- Regra para alvo: o host `192.168.1.30` nao deve receber instalacao do agente, Trivy, jobs, containers auxiliares ou processamento local da solucao
+- Regra de execucao: scanner, Trivy, Dependency-Track client, score, parsing, relatorios e qualquer processamento rodam somente no servidor central `200.160.19.14`
+- Regra para alvo: o host `200.160.19.2` nao deve receber instalacao do agente, Trivy, jobs, containers auxiliares ou processamento local da solucao
 
 ## 2. Principio mandatorio de seguranca: backend-only
 
@@ -29,7 +29,7 @@ Implicacoes tecnicas:
 - O frontend so podera consumir dados ja processados, normalizados e sanitizados por APIs backend.
 - O frontend nao deve receber chaves SSH, API keys, `.env`, comandos shell, paths internos sensiveis, SBOM bruto completo por padrao ou dados que permitam pivot operacional.
 - O backend sera responsavel por autenticacao, autorizacao, RBAC, auditoria, rate limit, validacao de input e logs.
-- O backend sera o unico componente autorizado a acessar `/opt/security/config`, Dependency-Track, hosts via SSH, Docker remoto e arquivos de output.
+- O backend sera o unico componente autorizado a acessar `/opt/security/security/config`, Dependency-Track, hosts via SSH, Docker remoto e arquivos de output.
 - Relatorios publicados para frontend devem ser copias sanitizadas ou renderizacoes controladas geradas pelo backend.
 - O host alvo deve ser tratado como fonte de dados operacional, nao como executor de processamento da plataforma.
 
@@ -82,18 +82,18 @@ Componentes backend:
 
 Modelo de execucao:
 
-- O servidor central `192.168.1.22` executa todo o pipeline.
-- O host alvo `192.168.1.30` e acessado por SSH apenas para coleta de inventario Docker e metadados necessarios.
-- Trivy roda exclusivamente em `192.168.1.22`.
-- Dependency-Track, score, MITRE, historico e relatorios rodam exclusivamente em `192.168.1.22`.
+- O servidor central `200.160.19.14` executa todo o pipeline.
+- O host alvo `200.160.19.2` e acessado por SSH apenas para coleta de inventario Docker e metadados necessarios.
+- Trivy roda exclusivamente em `200.160.19.14`.
+- Dependency-Track, score, MITRE, historico e relatorios rodam exclusivamente em `200.160.19.14`.
 - O alvo nao deve executar Trivy, scripts persistentes, agentes, containers da solucao ou tarefas agendadas da plataforma.
-- Para scan de imagens, o backend central deve preferir puxar as imagens por registry a partir do `192.168.1.22`.
+- Para scan de imagens, o backend central deve preferir puxar as imagens por registry a partir do `200.160.19.14`.
 - Imagens locais que existam somente no alvo exigem uma decisao operacional: publicar em registry privado ou permitir uma coleta controlada de artefato de imagem. Essa excecao deve ser configuravel, auditada e desabilitada por padrao.
 
 Diretorio alvo:
 
 ```text
-/opt/security/
+/opt/security/security/
   scanner/
   collectors/
   checks/
@@ -183,7 +183,7 @@ Criterios de aceite:
 
 ### RF04 - Scan Trivy
 
-O backend deve executar Trivy no servidor central `192.168.1.22` para cada imagem unica por ciclo.
+O backend deve executar Trivy no servidor central `200.160.19.14` para cada imagem unica por ciclo.
 
 Criterios de aceite:
 
@@ -264,7 +264,7 @@ Criterios de aceite:
 
 - SSH somente com chave.
 - Secrets apenas em `.env` protegido, fora do versionamento.
-- Permissoes restritas em `/opt/security/config`.
+- Permissoes restritas em `/opt/security/security/config`.
 - Logs sem secrets.
 - Timeouts por host e por scan.
 - Paralelismo controlado.
@@ -333,7 +333,7 @@ Codigos de saida recomendados:
 
 ## 10. Testes de aceite do MVP
 
-- `ssh root@192.168.1.30 "docker ps"` funciona a partir do servidor central.
+- `ssh root@200.160.19.2 "docker ps"` funciona a partir do servidor central.
 - Inventario JSON contem todos os containers retornados por Docker.
 - Imagens repetidas sao escaneadas uma unica vez por ciclo.
 - Pelo menos um SBOM CycloneDX e gerado com sucesso.
@@ -342,7 +342,7 @@ Codigos de saida recomendados:
 - Relatorio gerencial apresenta risco geral e top riscos.
 - Nenhum log contem API key, chave privada ou segredo.
 - Nenhum modulo frontend executa processamento sensivel.
-- `trivy` e executado somente em `192.168.1.22`.
+- `trivy` e executado somente em `200.160.19.14`.
 - O host alvo nao recebe agente, Trivy, containers auxiliares ou tarefas persistentes da solucao.
 - Imagem nao disponivel ao scanner central gera falha tratada, nao processamento no alvo.
 
@@ -351,11 +351,11 @@ Codigos de saida recomendados:
 Fase 0 - Preparacao:
 
 - Instalar dependencias no servidor central.
-- Criar estrutura `/opt/security`.
+- Criar estrutura `/opt/security/security`.
 - Copiar PRD e spec.
-- Criar `hosts.yml` para `192.168.1.30`.
+- Criar `hosts.yml` para `200.160.19.2`.
 - Validar SSH central -> alvo.
-- Instalar Trivy somente em `192.168.1.22`.
+- Instalar Trivy somente em `200.160.19.14`.
 - Definir como o scanner central acessara as imagens: registry, credenciais de registry ou excecao controlada.
 
 Fase 1 - MVP tecnico:
@@ -382,9 +382,9 @@ Fase 3 - Operacao:
 ## 12. Decisoes iniciais
 
 - O processamento sera backend-only por desenho.
-- O alvo piloto sera `192.168.1.30`.
-- O servidor central sera `192.168.1.22`.
-- Trivy roda somente no servidor central `192.168.1.22`.
+- O alvo piloto sera `200.160.19.2`.
+- O servidor central sera `200.160.19.14`.
+- Trivy roda somente no servidor central `200.160.19.14`.
 - O servidor que hospeda clientes nao deve executar processamento da solucao.
 - A primeira implementacao deve favorecer scripts backend simples e auditaveis antes de qualquer portal web.
 - Dependency-Track e Trivy sao dependencias centrais do fluxo.

@@ -47,6 +47,15 @@ threshold = 0
 message = "Uma ou mais etapas do scan terminaram com falha."
 
 [[rules]]
+id = "context_scan_gap"
+severity = "critical"
+channel = "grafana"
+path = "derived.unscannable_contexts"
+operator = "gt"
+threshold = 0
+message = "Um ou mais contextos Docker nao puderam ser escaneados."
+
+[[rules]]
 id = "dtrack_vulnerable_components"
 severity = "warning"
 channel = "grafana"
@@ -54,3 +63,21 @@ path = "dtrack_analysis.totals.dtrack_vulnerable_components"
 operator = "gt"
 threshold = 0
 message = "O Dependency-Track correlacionou componentes vulneraveis."
+
+[[rules]]
+id = "code_secret_detected"
+severity = "critical"
+channel = "grafana"
+path = "derived.code_secrets"
+operator = "gt"
+threshold = 0
+message = "Foram encontrados secrets em diretorios de codigo dos clientes."
+
+[[rules]]
+id = "code_high_findings"
+severity = "warning"
+channel = "grafana"
+path = "derived.code_high_findings"
+operator = "gt"
+threshold = 0
+message = "Foram encontrados achados altos no scan de codigo."

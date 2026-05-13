@@ -3,6 +3,7 @@ import argparse
 import csv
 import html
 import json
+import math
 import os
 import re
 import shutil
@@ -76,6 +77,24 @@ def esc(value):
     return html.escape(str(value if value is not None else ""))
 
 
+def safe_number(value, default=0):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return number
+
+
+def safe_int(value, default=0):
+    return int(safe_number(value, default))
+
+
+def display_context(row):
+    return row.get("context") or row.get("docker_context") or "docker default"
+
+
 def slugify(value):
     text = str(value if value is not None else "unknown").lower()
     text = re.sub(r"[^a-z0-9]+", "-", text)
@@ -98,7 +117,7 @@ def classify(score):
 
 def score_findings(findings, inventory=None, image_vulns=None):
     by_container = defaultdict(lambda: {"score": 0, "factors": [], "findings": 0})
-    context_map = {}
+    container_meta = {}
     if inventory:
         for host in inventory.get("hosts", []):
             for container in host.get("containers", []):
@@ -107,7 +126,13 @@ def score_findings(findings, inventory=None, image_vulns=None):
                     container.get("name") or "unknown",
                     container.get("image") or "unknown",
                 )
-                context_map[key] = container.get("context") or "docker default"
+                container_meta[key] = {
+                    "context": container.get("context") or container.get("docker_context") or "docker default",
+                    "context_source": container.get("context_source"),
+                    "docker_context": container.get("docker_context") or "default",
+                    "docker_context_owner": container.get("docker_context_owner") or "root",
+                    "docker_endpoint_host": container.get("docker_endpoint_host"),
+                }
     for finding in findings:
         key = (
             finding.get("host_name") or "unknown",
@@ -154,11 +179,16 @@ def score_findings(findings, inventory=None, image_vulns=None):
     rows = []
     for (host, container, image), value in by_container.items():
         score = min(100, value["score"])
+        meta = container_meta.get((host, container, image), {})
         rows.append({
             "host_name": host,
             "container_name": container,
             "image": image,
-            "context": context_map.get((host, container, image), "docker default"),
+            "context": meta.get("context") or "docker default",
+            "context_source": meta.get("context_source"),
+            "docker_context": meta.get("docker_context") or "default",
+            "docker_context_owner": meta.get("docker_context_owner") or "root",
+            "docker_endpoint_host": meta.get("docker_endpoint_host"),
             "score": score,
             "classification": classify(score),
             "findings": value["findings"],
@@ -216,7 +246,7 @@ def load_vulnerabilities(trivy_summary):
 def summarize_context(rows):
     summary = {}
     for row in rows:
-        context = row.get("context") or "docker default"
+        context = display_context(row)
         item = summary.setdefault(context, {
             "context": context,
             "containers": 0,
@@ -227,11 +257,11 @@ def summarize_context(rows):
             "critical_containers": 0,
             "high_containers": 0,
         })
-        score = int(row.get("score", 0) or 0)
+        score = safe_int(row.get("score"))
         item["containers"] += 1
         item["score_sum"] += score
         item["score_max"] = max(item["score_max"], score)
-        item["findings"] += int(row.get("findings", 0) or 0)
+        item["findings"] += safe_int(row.get("findings"))
         if row.get("classification") == "critico":
             item["critical_containers"] += 1
         elif row.get("classification") == "alto":
@@ -296,6 +326,22 @@ def render_executive(run_id, inventory, risk_rows, vuln_summary, dtrack_summary,
           {kpi("Criticas", severity_counts.get("CRITICAL", 0), "CVEs")}
           {kpi("Altas", severity_counts.get("HIGH", 0), "CVEs")}
           {kpi("DT vulns", dtrack_totals.get("dtrack_vulnerabilities", 0), "correlacionadas")}
+        </section>
+
+        <section class="grid two">
+          <div class="panel">
+            <h2>Distribuicao das vulnerabilidades</h2>
+            {svg_donut_chart(severity_counts, SEVERITY_ORDER, "CVEs por severidade", "total")}
+          </div>
+          <div class="panel">
+            <h2>Vulnerabilidades por classificacao</h2>
+            {svg_bar_chart(finding_severity, FINDING_SEVERITY_ORDER, "achados")}
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Volumetria historica</h2>
+          {svg_line_chart(trend_rows, ["max_score", "critical"], ["Score maximo", "CVEs criticas"])}
         </section>
 
         {dtrack_correlation_notice(vuln_summary, dtrack_analysis)}
@@ -378,7 +424,7 @@ def technical_nav(risk_rows, selected_slug=None):
         rows.append(
             f"""<a class="nav-button {"active" if slug == selected_slug else ""}" href="/reports/technical/containers/{esc(slug)}">
               <strong>{esc(row.get('container_name'))}</strong>
-              <span>{esc(row.get('context'))} - score {esc(row.get('score'))}</span>
+              <span>{esc(display_context(row))} - score {esc(row.get('score'))}</span>
             </a>"""
         )
     sections = [
@@ -440,6 +486,44 @@ def vulnerability_rows_for_images(vuln_summary, images, limit=250):
     return "".join(rows)
 
 
+def vulnerability_client_rows(risk_rows, vuln_summary, limit=200):
+    by_image = vuln_summary.get("by_image") or {}
+    rows = []
+    seen = set()
+    for row in risk_rows:
+        context = display_context(row)
+        host = row.get("host_name") or "unknown"
+        container = row.get("container_name") or "unknown"
+        image = row.get("image") or "unknown"
+        for vuln in by_image.get(image, []):
+            vuln_id = vuln.get("VulnerabilityID") or vuln.get("ID") or "unknown"
+            key = (context, host, container, image, vuln_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            description = vuln.get("Description") or vuln.get("Title") or ""
+            rows.append(
+                "<tr>"
+            f"<td>{esc(context)}</td>"
+                f"<td>{esc(host)}</td>"
+                f"<td>{esc(container)}</td>"
+                f"<td>{esc(image)}</td>"
+                f"<td>{esc(vuln_id)}</td>"
+                f"<td>{badge(vuln.get('Severity') or 'UNKNOWN')}</td>"
+                f"<td>{esc(vuln.get('PkgName'))}</td>"
+                f"<td>{esc(vuln.get('InstalledVersion'))}</td>"
+                f"<td>{esc(vuln.get('FixedVersion'))}</td>"
+                f"<td>{esc(vuln.get('Title') or '')}</td>"
+                f"<td>{esc(description[:240])}</td>"
+                "</tr>"
+            )
+            if len(rows) >= limit:
+                return "".join(rows)
+    if not rows:
+        return '<tr><td colspan="11" class="muted">Sem CVEs para o cliente selecionado.</td></tr>'
+    return "".join(rows)
+
+
 def vulnerability_container_index(risk_rows, vuln_summary):
     by_image = vuln_summary.get("by_image") or {}
     rows = []
@@ -451,7 +535,7 @@ def vulnerability_container_index(risk_rows, vuln_summary):
         rows.append(
             "<tr>"
             f"<td><a class=\"table-action\" href=\"/reports/technical/containers/{esc(container_slug(row))}\">{esc(row.get('container_name'))}</a></td>"
-            f"<td>{esc(row.get('context'))}</td>"
+            f"<td>{esc(display_context(row))}</td>"
             f"<td>{esc(row.get('image'))}</td>"
             f"<td>{esc(len(vulns))}</td>"
             f"<td>{esc(counts.get('CRITICAL', 0))}</td>"
@@ -469,6 +553,34 @@ def vulnerability_container_index(risk_rows, vuln_summary):
       </table>
     </div>
     """
+
+
+def detected_context_rows(inventory):
+    rows = []
+    for host in inventory.get("hosts", []):
+        host_name = host.get("host_name") or host.get("ip") or "unknown"
+        for context in host.get("contexts", []):
+            owner = context.get("owner_user") or "root"
+            errors = context.get("errors") or []
+            error_text = "; ".join(
+                str(error.get("stage") or error.get("error") or error.get("stderr") or "")[:120]
+                for error in errors
+                if error
+            )
+            rows.append(
+                "<tr>"
+                f"<td>{esc(host_name)}</td>"
+                f"<td>{esc(context.get('name') or 'default')}</td>"
+                f"<td>{esc(owner)}</td>"
+                f"<td>{badge(context.get('status') or 'unknown')}</td>"
+                f"<td>{esc(context.get('containers'))}</td>"
+                f"<td>{esc(context.get('images'))}</td>"
+                f"<td>{esc(error_text or '-')}</td>"
+                "</tr>"
+            )
+    if not rows:
+        return '<tr><td colspan="7" class="muted">Nenhum contexto foi detectado nesta execucao.</td></tr>'
+    return "".join(rows)
 
 
 def severity_counts_for_images(vuln_summary, images):
@@ -507,6 +619,7 @@ def render_technical(run_id, inventory, findings, risk_rows, trivy_summary, vuln
     for finding in visible_findings:
         finding_rows.append(
             "<tr>"
+            f"<td>{esc(display_context(finding))}</td>"
             f"<td>{esc(finding.get('host_name'))}</td>"
             f"<td>{esc(finding.get('container_name'))}</td>"
             f"<td>{esc(finding.get('severity'))}</td>"
@@ -516,12 +629,13 @@ def render_technical(run_id, inventory, findings, risk_rows, trivy_summary, vuln
             "</tr>"
         )
     if not finding_rows:
-        finding_rows.append('<tr><td colspan="6" class="muted">Sem achados de configuracao para o filtro selecionado.</td></tr>')
+        finding_rows.append('<tr><td colspan="7" class="muted">Sem achados de configuracao para o filtro selecionado.</td></tr>')
 
     risk_rows_html = []
     for row in visible_risk_rows:
         risk_rows_html.append(
             "<tr>"
+            f"<td>{esc(display_context(row))}</td>"
             f"<td>{esc(row['host_name'])}</td>"
             f"<td>{esc(row['container_name'])}</td>"
             f"<td>{esc(row['image'])}</td>"
@@ -592,6 +706,22 @@ def render_technical(run_id, inventory, findings, risk_rows, trivy_summary, vuln
           {scope_kpis}
         </section>
 
+        <section class="grid two">
+          <div class="panel">
+            <h2>CVEs por severidade</h2>
+            {svg_donut_chart(severity_counts, SEVERITY_ORDER, "total de CVEs", "severidade")}
+          </div>
+          <div class="panel">
+            <h2>Achados por tipo</h2>
+            {svg_bar_chart(finding_types, sorted(finding_types, key=finding_types.get, reverse=True)[:5], "achados")}
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Score por contexto</h2>
+          {svg_rank_chart(visible_context_summary, "score_max", "context", "contextos")}
+        </section>
+
         {dtrack_correlation_notice(vuln_summary, dtrack_analysis)}
 
         <section class="grid two">
@@ -615,11 +745,22 @@ def render_technical(run_id, inventory, findings, risk_rows, trivy_summary, vuln
           {context_table(visible_context_summary[:8])}
         </section>
 
+        <section id="contextos-detectados" class="panel">
+          <h2>Contextos Detectados</h2>
+          <p class="muted">Lista dos contextos Docker encontrados no host, incluindo os que nao puderam ser coletados por indisponibilidade do daemon.</p>
+          <div class="table-wrap">
+            <table>
+              <tr><th>Host</th><th>Contexto Docker</th><th>Usuario</th><th>Status</th><th>Containers</th><th>Imagens</th><th>Erro</th></tr>
+              {detected_context_rows(inventory)}
+            </table>
+          </div>
+        </section>
+
         <section id="score-container" class="panel">
           <h2>Score por Container</h2>
           <div class="table-wrap">
             <table>
-              <tr><th>Host</th><th>Container</th><th>Imagem</th><th>Score</th><th>Classe</th><th>Achados</th></tr>
+              <tr><th>Contexto</th><th>Host</th><th>Container</th><th>Imagem</th><th>Score</th><th>Classe</th><th>Achados</th></tr>
               {''.join(risk_rows_html)}
             </table>
           </div>
@@ -647,11 +788,22 @@ def render_technical(run_id, inventory, findings, risk_rows, trivy_summary, vuln
           </div>
         </section>
 
+        <section id="cves-por-cliente" class="panel">
+          <h2>CVEs por Cliente</h2>
+          <p class="muted">Cada linha mostra o contexto real do cliente/container, o CVE e uma descricao resumida para apoiar triagem.</p>
+          <div class="table-wrap">
+            <table>
+              <tr><th>Contexto</th><th>Host</th><th>Container</th><th>Imagem</th><th>CVE</th><th>Severidade</th><th>Pacote</th><th>Instalada</th><th>Corrigida</th><th>Titulo</th><th>Descricao</th></tr>
+              {vulnerability_client_rows(visible_risk_rows if selected_container else risk_rows, vuln_summary)}
+            </table>
+          </div>
+        </section>
+
         <section id="achados-configuracao" class="panel">
           <h2>Achados de Configuracao</h2>
           <div class="table-wrap">
             <table>
-              <tr><th>Host</th><th>Container</th><th>Severidade</th><th>Tipo</th><th>Evidencia</th><th>Recomendacao</th></tr>
+              <tr><th>Contexto</th><th>Host</th><th>Container</th><th>Severidade</th><th>Tipo</th><th>Evidencia</th><th>Recomendacao</th></tr>
               {''.join(finding_rows)}
             </table>
           </div>
@@ -723,8 +875,8 @@ def render_index(run_id, inventory, risk_rows, vuln_summary, dtrack_summary, dtr
           <div class="actions">
             <a href="executive_report_latest.html">Relatorio gerencial</a>
             <a href="technical_report_latest.html">Relatorio tecnico</a>
-            <a href="http://192.168.1.22:8090">Painel do scanner</a>
-            <a href="http://192.168.1.22:8080">Dependency-Track</a>
+            <a href="http://200.160.19.14:8090">Painel do scanner</a>
+            <a href="http://200.160.19.14:8080">Dependency-Track</a>
           </div>
         </section>
         """,
@@ -740,47 +892,80 @@ def base_html(title, body):
   <title>{esc(title)}</title>
   <style>
     :root {{
-      --bg: #f6f8fb;
-      --panel: #ffffff;
-      --text: #1f2933;
-      --muted: #64748b;
-      --line: #d9e2ec;
-      --critical: #b42318;
-      --high: #c2410c;
-      --medium: #b7791f;
-      --low: #2f855a;
-      --info: #2563eb;
+      --bg: #111319;
+      --panel: #181b22;
+      --panel-2: #1d212a;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --line: #2a2f39;
+      --critical: #ef6a73;
+      --high: #f59e6b;
+      --medium: #f4d27a;
+      --low: #3dd3c5;
+      --info: #6fa8ff;
     }}
     * {{ box-sizing: border-box; }}
-    body {{ margin: 0; background: var(--bg); color: var(--text); font-family: Arial, Helvetica, sans-serif; }}
-    h1, h2 {{ margin: 0; color: #102a43; letter-spacing: 0; }}
-    h1 {{ font-size: 32px; }}
-    h2 {{ font-size: 18px; margin-bottom: 16px; }}
-    code {{ background: #edf2f7; padding: 2px 5px; border-radius: 4px; }}
-    .hero {{ display: flex; justify-content: space-between; align-items: stretch; gap: 24px; padding: 30px 34px; background: #102a43; color: #fff; }}
-    .hero.compact {{ padding: 24px 34px; }}
-    .hero h1, .hero .muted, .hero .eyebrow {{ color: #fff; }}
-    .hero-actions {{ margin: 14px 0 0; }}
-    .hero-actions a {{ display: inline-block; background: #ffffff; color: #102a43; text-decoration: none; font-weight: 700; padding: 9px 12px; border-radius: 6px; }}
-    .eyebrow {{ text-transform: uppercase; font-size: 12px; font-weight: 700; letter-spacing: 1px; margin: 0 0 8px; }}
+    body {{
+      margin: 0;
+      background:
+        radial-gradient(circle at top left, rgba(111, 168, 255, 0.10), transparent 24%),
+        radial-gradient(circle at top right, rgba(61, 211, 197, 0.08), transparent 22%),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    h1, h2 {{ margin: 0; color: var(--text); letter-spacing: 0; }}
+    h1 {{ font-size: 30px; font-weight: 700; }}
+    h2 {{ font-size: 17px; margin-bottom: 14px; }}
+    code {{ background: #252a35; padding: 2px 5px; border-radius: 4px; color: #dbeafe; }}
+    .hero {{
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 24px;
+      padding: 24px 28px;
+      background: #171a22;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      margin: 18px 20px 0;
+      box-shadow: 0 10px 22px rgba(0, 0, 0, 0.22);
+    }}
+    .hero.compact {{ padding: 20px 28px; }}
+    .hero h1, .hero .muted, .hero .eyebrow {{ color: var(--text); }}
+    .hero-actions {{ margin: 14px 0 0; display: flex; gap: 10px; flex-wrap: wrap; }}
+    .hero-actions a {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: #1f2430;
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 700;
+      padding: 9px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+    }}
+    .hero-actions a.primary {{ background: #0b5cad; border-color: #0b5cad; }}
+    .eyebrow {{ text-transform: uppercase; font-size: 12px; font-weight: 700; letter-spacing: 1px; margin: 0 0 8px; color: var(--muted); }}
     .muted {{ color: var(--muted); }}
-    .risk-card {{ min-width: 210px; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.24); border-radius: 8px; padding: 18px; display: grid; gap: 4px; }}
-    .risk-card span, .risk-card em {{ color: #d9e2ec; font-style: normal; }}
+    .risk-card {{ min-width: 210px; background: #1d212a; border: 1px solid var(--line); border-radius: 8px; padding: 18px; display: grid; gap: 4px; }}
+    .risk-card span, .risk-card em {{ color: #aeb7c6; font-style: normal; }}
     .risk-card strong {{ font-size: 34px; }}
-    .kpis {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; padding: 20px 34px 0; }}
+    .kpis {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; padding: 18px 20px 0; }}
     .kpis.inline {{ padding-left: 0; padding-right: 0; }}
-    .kpi {{ background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }}
+    .kpi {{ background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; box-shadow: 0 8px 18px rgba(0, 0, 0, 0.18); }}
     .kpi span {{ color: var(--muted); font-size: 13px; }}
     .kpi strong {{ display: block; font-size: 28px; margin: 6px 0; }}
-    .grid {{ display: grid; gap: 18px; padding: 20px 34px 0; }}
+    .grid {{ display: grid; gap: 18px; padding: 18px 20px 0; }}
     .grid.two {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-    .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin: 20px 34px 0; padding: 20px; }}
+    .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin: 18px 20px 0; padding: 18px; box-shadow: 0 8px 18px rgba(0, 0, 0, 0.14); }}
     .grid .panel {{ margin: 0; }}
-    .notice {{ border-left: 5px solid var(--info); background: #eff6ff; }}
-    .notice.warning {{ border-left-color: var(--high); background: #fff7ed; }}
+    .notice {{ border-left: 5px solid var(--info); background: #151a23; }}
+    .notice.warning {{ border-left-color: var(--high); background: #1a1b20; }}
     .notice p {{ margin: 0; line-height: 1.45; }}
     .bar-row {{ display: grid; grid-template-columns: 120px 1fr 56px; gap: 10px; align-items: center; margin: 10px 0; }}
-    .track {{ height: 14px; background: #e6edf5; border-radius: 999px; overflow: hidden; }}
+    .track {{ height: 14px; background: #262b35; border-radius: 999px; overflow: hidden; }}
     .bar {{ height: 100%; border-radius: 999px; }}
     .bar.critical, .bar.critico {{ background: var(--critical); }}
     .bar.high, .bar.alto {{ background: var(--high); }}
@@ -790,34 +975,34 @@ def base_html(title, body):
     .risk-bars .bar-row {{ grid-template-columns: 250px 1fr 48px; }}
     table {{ border-collapse: collapse; width: 100%; }}
     th, td {{ border-bottom: 1px solid var(--line); padding: 9px; text-align: left; vertical-align: top; font-size: 13px; }}
-    th {{ background: #f0f4f8; color: #334e68; }}
+    th {{ background: #202532; color: #cbd5e1; }}
     .table-wrap {{ overflow-x: auto; }}
-    .badge {{ display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; color: #fff; background: var(--info); }}
+    .badge {{ display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; color: #0f172a; background: var(--info); }}
     .badge.critical, .badge.critico, .badge.failed, .badge.upload_failed {{ background: var(--critical); }}
     .badge.high, .badge.alto, .badge.partial_success {{ background: var(--high); }}
-    .badge.medium, .badge.medio, .badge.skipped_no_sbom, .badge.image_unavailable_for_central_scan {{ background: var(--medium); }}
+    .badge.medium, .badge.medio, .badge.skipped_no_sbom, .badge.image_unavailable_for_central_scan, .badge.daemon_absent {{ background: var(--medium); }}
     .badge.low, .badge.baixo, .badge.success, .badge.uploaded {{ background: var(--low); }}
     .actions {{ display: flex; gap: 12px; flex-wrap: wrap; }}
-    .actions a {{ background: #0b5cad; color: #fff; text-decoration: none; padding: 10px 12px; border-radius: 6px; }}
+    .actions a {{ background: #0b5cad; color: #fff; text-decoration: none; padding: 10px 12px; border-radius: 8px; border: 1px solid #0b5cad; }}
     .technical-layout {{ display: grid; grid-template-columns: 280px minmax(0, 1fr); min-height: 100vh; }}
     .technical-main {{ min-width: 0; padding-bottom: 34px; }}
-    .technical-layout .hero, .technical-layout .grid, .technical-layout .panel, .technical-layout .kpis {{ margin-left: 20px; margin-right: 24px; }}
-    .technical-layout .grid {{ padding-left: 20px; padding-right: 24px; }}
-    .side-nav {{ position: sticky; top: 0; align-self: start; height: 100vh; overflow: auto; background: #0b1f33; border-right: 1px solid #17324d; padding: 18px 14px; }}
+    .technical-layout .hero, .technical-layout .grid, .technical-layout .panel, .technical-layout .kpis {{ margin-left: 20px; margin-right: 20px; }}
+    .technical-layout .grid {{ padding-left: 20px; padding-right: 20px; }}
+    .side-nav {{ position: sticky; top: 0; align-self: start; height: 100vh; overflow: auto; background: #0d1117; border-right: 1px solid #242a35; padding: 18px 14px; }}
     .side-nav h2 {{ color: #fff; font-size: 16px; margin: 0 0 14px; }}
-    .nav-group {{ border: 1px solid #1f4568; border-radius: 8px; margin-bottom: 12px; background: rgba(255,255,255,.03); }}
+    .nav-group {{ border: 1px solid #2a3040; border-radius: 8px; margin-bottom: 12px; background: rgba(255,255,255,.03); }}
     .nav-group summary {{ cursor: pointer; color: #fff; font-weight: 700; padding: 12px; list-style: none; }}
     .nav-group summary::-webkit-details-marker {{ display: none; }}
     .nav-group summary::after {{ content: "+"; float: right; color: #7cc4ff; }}
     .nav-group[open] summary::after {{ content: "-"; }}
     .nav-items {{ padding: 0 10px 10px; }}
-    .nav-button {{ display: grid; gap: 4px; color: #d9e2ec; text-decoration: none; border: 1px solid #244b70; border-radius: 8px; padding: 10px; margin-bottom: 8px; background: #102a43; box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }}
-    .nav-button.secondary {{ background: #0f253a; }}
-    .nav-button:hover, .nav-button.active {{ background: #0b5cad; border-color: #7cc4ff; color: #fff; }}
+    .nav-button {{ display: grid; gap: 4px; color: #d9e2ec; text-decoration: none; border: 1px solid #283142; border-radius: 8px; padding: 10px; margin-bottom: 8px; background: #141922; box-shadow: inset 0 1px 0 rgba(255,255,255,.03); }}
+    .nav-button.secondary {{ background: #11161f; }}
+    .nav-button:hover, .nav-button.active {{ background: #182333; border-color: #67b7ff; color: #fff; }}
     .nav-button strong {{ color: #fff; font-size: 13px; overflow-wrap: anywhere; }}
     .nav-button span {{ color: #bcccdc; font-size: 12px; }}
     .nav-button:hover span, .nav-button.active span {{ color: #e6f4ff; }}
-    .table-action {{ display: inline-block; background: #0b5cad; color: #fff; text-decoration: none; font-weight: 700; padding: 7px 9px; border-radius: 6px; }}
+    .table-action {{ display: inline-block; background: #0b5cad; color: #fff; text-decoration: none; font-weight: 700; padding: 7px 9px; border-radius: 8px; }}
     .table-action:hover {{ background: #083f78; }}
     .priority {{ margin: 0; padding-left: 22px; }}
     .legend {{ display: flex; gap: 18px; color: var(--muted); font-size: 13px; margin-bottom: 12px; }}
@@ -830,6 +1015,111 @@ def base_html(title, body):
     .trend-bar {{ width: 18px; border-radius: 4px 4px 0 0; display: inline-block; min-height: 2px; }}
     .trend-item strong {{ color: var(--text); }}
     .trend-item em {{ font-style: normal; font-size: 12px; }}
+    .chart-shell {{
+      display: grid;
+      gap: 12px;
+      align-items: center;
+      min-width: 0;
+    }}
+    .chart-svg {{
+      width: 100%;
+      height: auto;
+      display: block;
+    }}
+    .chart-svg.donut {{
+      width: min(100%, 260px);
+      max-height: 260px;
+      justify-self: center;
+    }}
+    .chart-svg.bars, .chart-svg.line {{
+      max-height: 280px;
+    }}
+    .chart-svg text {{
+      fill: var(--muted);
+      font-family: inherit;
+    }}
+    .chart-main-value {{
+      font-size: 32px;
+      fill: var(--text) !important;
+      font-weight: 700;
+    }}
+    .chart-main-label {{
+      font-size: 13px;
+    }}
+    .chart-axis {{
+      font-size: 11px;
+      fill: var(--muted);
+    }}
+    .chart-y {{
+      font-size: 10px;
+      fill: var(--muted);
+    }}
+    .chart-value {{
+      font-size: 11px;
+      fill: var(--text) !important;
+      font-weight: 700;
+    }}
+    .chart-baseline {{
+      stroke: var(--line);
+      stroke-width: 1;
+    }}
+    .chart-gridline {{
+      stroke: var(--line);
+      stroke-width: 1;
+      opacity: 0.65;
+    }}
+    .chart-legend {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 16px;
+    }}
+    .chart-legend-item {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .chart-legend-item strong {{
+      color: var(--text);
+    }}
+    .chart-legend-item .swatch {{
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      display: inline-block;
+    }}
+    .chart-empty {{
+      padding: 18px;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      background: var(--panel-2);
+    }}
+    .toolbar {{
+      margin: 18px 20px 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }}
+    .toolbar .buttons {{
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }}
+    .toolbar .button {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 12px;
+      border-radius: 8px;
+      background: #1c2230;
+      color: var(--text);
+      border: 1px solid var(--line);
+      text-decoration: none;
+      font-weight: 700;
+    }}
+    .toolbar .button.primary {{ background: #0b5cad; border-color: #0b5cad; }}
     @media (max-width: 860px) {{
       .hero {{ flex-direction: column; }}
       .grid.two {{ grid-template-columns: 1fr; }}
@@ -838,10 +1128,22 @@ def base_html(title, body):
       .side-nav {{ position: static; height: auto; }}
       .technical-layout .hero, .technical-layout .grid, .technical-layout .panel, .technical-layout .kpis {{ margin-left: 14px; margin-right: 14px; }}
       .technical-layout .grid {{ padding-left: 14px; padding-right: 14px; }}
+      .toolbar {{ margin: 18px 14px 0; flex-direction: column; align-items: flex-start; }}
     }}
   </style>
 </head>
 <body>
+<div class="toolbar">
+  <div class="buttons">
+    <a class="button primary" href="/reports/executive">Gerencial</a>
+    <a class="button" href="/reports/technical">Tecnico</a>
+    <a class="button" href="/api/status">JSON</a>
+  </div>
+  <div class="buttons">
+    <a class="button" href="/reports/executive.pdf">Exportar PDF</a>
+    <a class="button" href="/reports/technical?filters=1">Filtros</a>
+  </div>
+</div>
 {body}
 </body>
 </html>
@@ -864,10 +1166,10 @@ def badge(value):
 def horizontal_bars(counts, order, class_fn):
     if not counts:
         return '<p class="muted">Sem dados nesta execucao.</p>'
-    max_value = max([int(counts.get(key, 0) or 0) for key in order] or [1]) or 1
+    max_value = max([safe_int(counts.get(key)) for key in order] or [1]) or 1
     rows = []
     for key in order:
-        value = int(counts.get(key, 0) or 0)
+        value = safe_int(counts.get(key))
         width = max(2, round((value / max_value) * 100)) if value else 0
         rows.append(
             f"""<div class="bar-row">
@@ -940,7 +1242,7 @@ def context_table(rows):
     for row in rows:
         rendered.append(
             "<tr>"
-            f"<td>{esc(row.get('context'))}</td>"
+            f"<td>{esc(display_context(row))}</td>"
             f"<td>{esc(row.get('containers'))}</td>"
             f"<td>{esc(row.get('score_max'))}</td>"
             f"<td>{esc(row.get('score_avg'))}</td>"
@@ -961,7 +1263,7 @@ def risk_bars(rows):
         return '<p class="muted">Sem dados nesta execucao.</p>'
     html_rows = []
     for row in rows:
-        score = int(row.get("score", 0) or 0)
+        score = max(0, min(100, safe_int(row.get("score"))))
         label = f"{row.get('container_name')} ({row.get('host_name')})"
         cls = severity_class(row.get("classification"))
         html_rows.append(
@@ -979,7 +1281,7 @@ def build_priority_actions(risk_rows, vuln_summary, inventory):
     high = (vuln_summary.get("severity_counts") or {}).get("HIGH", 0)
     actions = []
     for row in risk_rows:
-        score = int(row.get("score", 0) or 0)
+        score = safe_int(row.get("score"))
         if score >= 81:
             priority = "P1"
             sla = "7 dias"
@@ -995,6 +1297,7 @@ def build_priority_actions(risk_rows, vuln_summary, inventory):
         actions.append({
             "priority": priority,
             "sla": sla,
+            "context": row.get("context") or row.get("docker_context"),
             "container": row.get("container_name"),
             "host": row.get("host_name"),
             "image": row.get("image"),
@@ -1006,6 +1309,7 @@ def build_priority_actions(risk_rows, vuln_summary, inventory):
         actions.insert(0, {
             "priority": "P1",
             "sla": "48h a 7 dias",
+            "context": "ambiente",
             "container": "ambiente",
             "host": "todos",
             "image": "imagens com CVEs criticas/altas",
@@ -1055,6 +1359,7 @@ def priority_table(actions):
             "<tr>"
             f"<td>{badge(action['priority'])}</td>"
             f"<td>{esc(action['sla'])}</td>"
+            f"<td>{esc(action.get('context'))}</td>"
             f"<td>{esc(action['host'])}</td>"
             f"<td>{esc(action['container'])}</td>"
             f"<td>{esc(action['image'])}</td>"
@@ -1064,7 +1369,7 @@ def priority_table(actions):
         )
     return (
         "<div class=\"table-wrap\"><table>"
-        "<tr><th>Prioridade</th><th>SLA</th><th>Host</th><th>Container</th><th>Imagem</th><th>Score</th><th>Acao</th></tr>"
+        "<tr><th>Prioridade</th><th>SLA</th><th>Contexto</th><th>Host</th><th>Container</th><th>Imagem</th><th>Score</th><th>Acao</th></tr>"
         f"{''.join(rows)}</table></div>"
     )
 
@@ -1092,20 +1397,22 @@ def tactic_list(tactics):
 def trend_chart(rows):
     if not rows:
         return '<p class="muted">Historico insuficiente para tendencia.</p>'
-    max_score = max([row.get("max_score", 0) for row in rows] or [1]) or 1
-    max_critical = max([row.get("critical", 0) for row in rows] or [1]) or 1
+    max_score = max([safe_int(row.get("max_score")) for row in rows] or [1]) or 1
+    max_critical = max([safe_int(row.get("critical")) for row in rows] or [1]) or 1
     cards = []
     for row in rows:
-        score_h = max(2, round((row.get("max_score", 0) / max_score) * 100))
-        critical_h = max(2, round((row.get("critical", 0) / max_critical) * 100)) if row.get("critical", 0) else 0
+        score = safe_int(row.get("max_score"))
+        critical = safe_int(row.get("critical"))
+        score_h = max(2, round((score / max_score) * 100))
+        critical_h = max(2, round((critical / max_critical) * 100)) if critical else 0
         cards.append(
             f"""<div class="trend-item">
               <div class="trend-bars">
                 <span class="trend-bar score" style="height:{score_h}%"></span>
                 <span class="trend-bar critical" style="height:{critical_h}%"></span>
               </div>
-              <strong>{esc(row.get('max_score'))}</strong>
-              <span>{esc(row.get('critical'))} crit</span>
+              <strong>{esc(score)}</strong>
+              <span>{esc(critical)} crit</span>
               <em>{esc(short_run_id(row.get('run_id')))}</em>
             </div>"""
         )
@@ -1113,6 +1420,191 @@ def trend_chart(rows):
         '<div class="legend"><span><i class="score"></i>Score maximo</span><span><i class="critical"></i>CVEs criticas</span></div>'
         f'<div class="trend">{"".join(cards)}</div>'
     )
+
+
+def svg_donut_chart(counts, order, title, subtitle=None):
+    values = [(key, safe_int(counts.get(key))) for key in order]
+    total = sum(value for _, value in values)
+    size = 210
+    center = 105
+    radius = 72
+    circumference = 2 * 3.141592653589793 * radius
+    if total <= 0:
+        values = [(key, 0) for key in order]
+        total = 0
+
+    colors = {
+        "CRITICAL": "#ef6a73",
+        "HIGH": "#f59e6b",
+        "MEDIUM": "#f4d27a",
+        "LOW": "#3dd3c5",
+        "UNKNOWN": "#6fa8ff",
+        "critical": "#ef6a73",
+        "high": "#f59e6b",
+        "medium": "#f4d27a",
+        "low": "#3dd3c5",
+        "informational": "#6fa8ff",
+    }
+    segments = []
+    offset = 0.0
+    for key, value in values:
+        if total > 0 and value > 0:
+            length = (value / total) * circumference
+            segments.append(
+                f'<circle cx="{center}" cy="{center}" r="{radius}" fill="none" stroke="{colors.get(key, "#6fa8ff")}" '
+                f'stroke-width="18" stroke-linecap="round" stroke-dasharray="{length:.2f} {circumference - length:.2f}" '
+                f'stroke-dashoffset="{-offset:.2f}" transform="rotate(-90 {center} {center})"></circle>'
+            )
+            offset += length
+    legend = "".join(
+        f'<div class="chart-legend-item"><span class="swatch" style="background:{colors.get(key, "#6fa8ff")}"></span>'
+        f'<span>{esc(key)} <strong>{esc(value)}</strong></span></div>'
+        for key, value in values
+    )
+    return f"""
+    <div class="chart-shell">
+      <svg viewBox="0 0 {size} {size}" class="chart-svg donut">
+        <circle cx="{center}" cy="{center}" r="{radius}" fill="none" stroke="#283042" stroke-width="18"></circle>
+        {''.join(segments)}
+        <text x="{center}" y="{center - 2}" text-anchor="middle" class="chart-main-value">{esc(total)}</text>
+        <text x="{center}" y="{center + 18}" text-anchor="middle" class="chart-main-label">{esc(subtitle or 'total')}</text>
+      </svg>
+      <div class="chart-legend">{legend}</div>
+    </div>
+    """
+
+
+def svg_bar_chart(counts, order, title=None):
+    values = [(key, safe_int(counts.get(key))) for key in order]
+    max_value = max([value for _, value in values] or [1]) or 1
+    if max_value <= 0:
+        max_value = 1
+    width = 460
+    height = 220
+    bar_w = 44
+    gap = 18
+    left = 18
+    bottom = 24
+    chart_h = 150
+    colors = {
+        "CRITICAL": "#ef6a73",
+        "HIGH": "#f59e6b",
+        "MEDIUM": "#f4d27a",
+        "LOW": "#3dd3c5",
+        "UNKNOWN": "#6fa8ff",
+        "critical": "#ef6a73",
+        "high": "#f59e6b",
+        "medium": "#f4d27a",
+        "low": "#3dd3c5",
+        "informational": "#6fa8ff",
+    }
+    bars = []
+    x = left
+    for key, value in values:
+        h = max(8, round((max(value, 0) / max_value) * chart_h))
+        y = height - bottom - h
+        bars.append(
+            f'<rect x="{x}" y="{y}" width="{bar_w}" height="{h}" rx="6" fill="{colors.get(key, "#6fa8ff")}"></rect>'
+        )
+        bars.append(f'<text x="{x + bar_w / 2}" y="{height - 8}" text-anchor="middle" class="chart-axis">{esc(key)}</text>')
+        bars.append(f'<text x="{x + bar_w / 2}" y="{y - 8}" text-anchor="middle" class="chart-value">{esc(value)}</text>')
+        x += bar_w + gap
+    return f"""
+    <div class="chart-shell">
+      <svg viewBox="0 0 {width} {height}" class="chart-svg bars">
+        <line x1="0" y1="{height - bottom}" x2="{width}" y2="{height - bottom}" class="chart-baseline"></line>
+        {''.join(bars)}
+      </svg>
+    </div>
+    """
+
+
+def svg_line_chart(rows, keys, labels=None):
+    if not rows:
+        rows = [{key: 0 for key in keys}]
+    width = 640
+    height = 240
+    left = 20
+    top = 20
+    bottom = 32
+    chart_h = height - top - bottom
+    chart_w = width - (left * 2)
+    colors = ["#6fa8ff", "#ef6a73", "#3dd3c5", "#f4d27a"]
+    series = {key: [max(0, safe_int(row.get(key))) for row in rows] for key in keys}
+    max_value = max([max(values) for values in series.values()] or [1]) or 1
+    if max_value <= 0:
+        max_value = 1
+    points_html = []
+    legend_html = []
+    for index, key in enumerate(keys):
+        values = series[key]
+        coords = []
+        for pos, value in enumerate(values):
+            x = left + (chart_w * pos / max(len(values) - 1, 1))
+            y = top + chart_h - (chart_h * value / max_value)
+            coords.append(f"{x:.1f},{y:.1f}")
+        color = colors[index % len(colors)]
+        points_html.append(
+            f'<polyline points="{" ".join(coords)}" fill="none" stroke="{color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>'
+        )
+        points_html.append(
+            f'<polygon points="{left},{top + chart_h} {" ".join(coords)} {left + chart_w},{top + chart_h}" fill="{color}" opacity="0.08"></polygon>'
+        )
+        legend_label = labels[index] if labels and index < len(labels) else key
+        legend_html.append(
+            f'<div class="chart-legend-item"><span class="swatch" style="background:{color}"></span><span>{esc(legend_label)}</span></div>'
+        )
+    ticks = []
+    for idx, row in enumerate(rows):
+        x = left + (chart_w * idx / max(len(rows) - 1, 1))
+        ticks.append(f'<text x="{x:.1f}" y="{height - 8}" text-anchor="middle" class="chart-axis">{esc(short_run_id(row.get("run_id")))}</text>')
+    for step in range(0, 5):
+        value = round(max_value * step / 4)
+        y = top + chart_h - (chart_h * step / 4)
+        ticks.append(f'<text x="0" y="{y + 4:.1f}" class="chart-y">{esc(value)}</text>')
+    return f"""
+    <div class="chart-shell">
+      <svg viewBox="0 0 {width} {height}" class="chart-svg line">
+        <line x1="{left}" y1="{top + chart_h}" x2="{width - left}" y2="{top + chart_h}" class="chart-baseline"></line>
+        <line x1="{left}" y1="{top}" x2="{left}" y2="{top + chart_h}" class="chart-gridline"></line>
+        {''.join(points_html)}
+        {''.join(ticks)}
+      </svg>
+      <div class="chart-legend">{''.join(legend_html)}</div>
+    </div>
+    """
+
+
+def svg_rank_chart(rows, value_key, label_key, title=None, color="#6fa8ff", limit=6):
+    rows = rows[:limit]
+    if not rows:
+        rows = [{label_key: "sem dados", value_key: 0}]
+    width = 640
+    height = 240
+    left = 24
+    top = 22
+    bottom = 24
+    chart_h = height - top - bottom
+    max_value = max([safe_int(row.get(value_key)) for row in rows] or [1]) or 1
+    if max_value <= 0:
+        max_value = 1
+    bars = []
+    row_h = chart_h / max(len(rows), 1)
+    for idx, row in enumerate(rows):
+        value = safe_int(row.get(value_key))
+        bar_w = max(10, round((max(value, 0) / max_value) * (width - 180)))
+        y = top + (idx * row_h) + (row_h * 0.24)
+        bars.append(f'<text x="{left}" y="{y + 14:.1f}" class="chart-axis">{esc(row.get(label_key))}</text>')
+        bars.append(f'<rect x="220" y="{y:.1f}" width="{bar_w}" height="{max(8, row_h * 0.38):.1f}" rx="6" fill="{color}"></rect>')
+        bars.append(f'<text x="{220 + bar_w + 10}" y="{y + 14:.1f}" class="chart-value">{esc(value)}</text>')
+    return f"""
+    <div class="chart-shell">
+      <svg viewBox="0 0 {width} {height}" class="chart-svg bars">
+        <line x1="220" y1="{top}" x2="220" y2="{height - bottom}" class="chart-gridline"></line>
+        {''.join(bars)}
+      </svg>
+    </div>
+    """
 
 
 def context_trend_chart(rows):
@@ -1125,11 +1617,11 @@ def context_trend_chart(rows):
         lines.append(
             f"""<div class="trend-item">
               <div class="trend-bars">
-                <span class="trend-bar score" style="height:{max(2, min(100, int(lead.get('score_max', 0) or 0)))}%"></span>
-                <span class="trend-bar critical" style="height:{max(2, min(100, int(lead.get('critical_containers', 0) or 0) * 12))}%"></span>
+                <span class="trend-bar score" style="height:{max(2, min(100, safe_int(lead.get('score_max'))))}%"></span>
+                <span class="trend-bar critical" style="height:{max(2, min(100, safe_int(lead.get('critical_containers')) * 12))}%"></span>
               </div>
               <strong>{esc(lead.get('context', 'sem contexto'))}</strong>
-              <span>{esc(lead.get('score_max', 0))} max</span>
+              <span>{esc(safe_int(lead.get('score_max')))} max</span>
               <em>{esc(short_run_id(row.get('run_id')))}</em>
             </div>"""
         )
@@ -1309,10 +1801,10 @@ class PdfReport:
 
     def bar_chart(self, title, counts, order, color_fn):
         self.panel_title(title)
-        max_value = max([int(counts.get(key, 0) or 0) for key in order] or [1]) or 1
+        max_value = max([safe_int(counts.get(key)) for key in order] or [1]) or 1
         for key in order:
             self.ensure(22)
-            value = int(counts.get(key, 0) or 0)
+            value = safe_int(counts.get(key))
             width = 250 * value / max_value if value else 0
             self.text(self.margin, self.y + 10, key, size=9, color="text")
             self.rect(self.margin + 95, self.y, 250, 12, color="soft")
@@ -1326,8 +1818,8 @@ class PdfReport:
         self.panel_title("Top Containers por Risco")
         for row in rows[:10]:
             self.ensure(24)
-            label = f"{row.get('container_name')} ({row.get('context')})"
-            score = int(row.get("score", 0) or 0)
+            label = f"{row.get('container_name')} ({display_context(row)})"
+            score = max(0, min(100, safe_int(row.get("score"))))
             self.text(self.margin, self.y + 10, label[:48], size=9)
             self.rect(self.margin + 235, self.y, 250, 12, color="soft")
             self.rect(self.margin + 235, self.y, max(2, 250 * score / 100), 12, color=severity_class(row.get("classification")))
@@ -1344,7 +1836,7 @@ class PdfReport:
         self.y += 16
         for row in rows[:8]:
             self.ensure(18)
-            self.text(x_positions[0], self.y, row.get("context"), size=9)
+            self.text(x_positions[0], self.y, display_context(row), size=9)
             self.text(x_positions[1], self.y, row.get("containers"), size=9)
             self.text(x_positions[2], self.y, row.get("score_max"), size=9)
             self.text(x_positions[3], self.y, row.get("findings"), size=9)
@@ -1357,13 +1849,14 @@ class PdfReport:
             self.text(self.margin, self.y, "Historico insuficiente para tendencia.", size=9, color="muted")
             self.y += 20
             return
-        max_score = max([int(row.get("max_score", 0) or 0) for row in rows] or [1]) or 1
-        max_critical = max([int(row.get("critical", 0) or 0) for row in rows] or [1]) or 1
+        max_score = max([safe_int(row.get("max_score")) for row in rows] or [1]) or 1
+        max_critical = max([safe_int(row.get("critical")) for row in rows] or [1]) or 1
         base_y = self.y + 110
         x = self.margin
         for row in rows[-8:]:
-            score_h = 85 * int(row.get("max_score", 0) or 0) / max_score
-            crit_h = 85 * int(row.get("critical", 0) or 0) / max_critical if row.get("critical") else 0
+            score_h = 85 * safe_int(row.get("max_score")) / max_score
+            critical = safe_int(row.get("critical"))
+            crit_h = 85 * critical / max_critical if critical else 0
             self.rect(x, base_y - score_h, 16, score_h, color="info")
             if crit_h:
                 self.rect(x + 22, base_y - crit_h, 16, crit_h, color="critical")
@@ -1458,6 +1951,14 @@ def write_executive_pdf(path, run_id, inventory, risk_rows, vuln_summary, dtrack
     pdf.bar_chart("Achados de Configuracao", finding_severity, FINDING_SEVERITY_ORDER, severity_class)
     pdf.top_risk_chart(risk_rows)
     pdf.context_table_pdf(context_summary)
+    detected_contexts = []
+    for host in inventory.get("hosts", []):
+        host_name = host.get("host_name") or host.get("ip") or "unknown"
+        for context in host.get("contexts", []):
+            detected_contexts.append(
+                f"{host_name}: {context.get('name') or 'default'} - {context.get('status') or 'unknown'}"
+            )
+    pdf.bullet_list("Contextos Detectados", detected_contexts or ["Nenhum contexto detectado nesta execucao."])
     pdf.trend_chart_pdf(trend_rows)
     dominant_contexts = []
     for row in context_trend[-6:]:
@@ -1509,12 +2010,12 @@ def executive_pdf_lines(run_id, inventory, risk_rows, vuln_summary, dtrack_summa
     lines.extend(["", "Contextos prioritarios"])
     for row in context_summary[:8]:
         lines.append(
-            f"- {row.get('context')}: score max {row.get('score_max')}, containers {row.get('containers')}, achados {row.get('findings')}"
+            f"- {display_context(row)}: score max {row.get('score_max')}, containers {row.get('containers')}, achados {row.get('findings')}"
         )
     lines.extend(["", "Top containers por risco"])
     for row in risk_rows[:10]:
         lines.append(
-            f"- {row.get('container_name')} ({row.get('context')}): score {row.get('score')}, imagem {row.get('image')}"
+            f"- {row.get('container_name')} ({display_context(row)}): score {row.get('score')}, imagem {row.get('image')}"
         )
     lines.extend([
         "",
@@ -1542,17 +2043,17 @@ def load_trend(root):
         severity = vuln.get("severity_counts", {})
         rows.append({
             "run_id": data.get("run_id") or path.stem.replace("risk_scores_", ""),
-            "max_score": max([item.get("score", 0) for item in scores] or [0]),
-            "critical": severity.get("CRITICAL", 0),
-            "high": severity.get("HIGH", 0),
-            "total": vuln.get("total", 0),
+            "max_score": max([safe_int(item.get("score")) for item in scores] or [0]),
+            "critical": safe_int(severity.get("CRITICAL")),
+            "high": safe_int(severity.get("HIGH")),
+            "total": safe_int(vuln.get("total")),
         })
     return rows[-8:]
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate backend reports from scan artifacts.")
-    parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security"))
+    parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security/security"))
     parser.add_argument("--run-id", default=os.environ.get("RUN_ID") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     args = parser.parse_args()
 
@@ -1584,10 +2085,10 @@ def main():
     context_trend = context_trend[-8:]
     trend_rows.append({
         "run_id": args.run_id,
-        "max_score": max([item.get("score", 0) for item in risk_rows] or [0]),
-        "critical": (vuln_summary.get("severity_counts") or {}).get("CRITICAL", 0),
-        "high": (vuln_summary.get("severity_counts") or {}).get("HIGH", 0),
-        "total": vuln_summary.get("total", 0),
+        "max_score": max([safe_int(item.get("score")) for item in risk_rows] or [0]),
+        "critical": safe_int((vuln_summary.get("severity_counts") or {}).get("CRITICAL")),
+        "high": safe_int((vuln_summary.get("severity_counts") or {}).get("HIGH")),
+        "total": safe_int(vuln_summary.get("total")),
     })
     trend_rows = trend_rows[-8:]
 
@@ -1665,7 +2166,7 @@ def main():
 
 
 def write_priorities(path, actions):
-    fields = ["priority", "sla", "host", "container", "image", "score", "classification", "action"]
+    fields = ["priority", "sla", "context", "host", "container", "image", "score", "classification", "action"]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()

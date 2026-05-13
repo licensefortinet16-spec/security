@@ -4,8 +4,8 @@
 
 Servidor central:
 
-- Host: `192.168.1.22`
-- Diretorio: `/opt/security/dtrack`
+- Host: `200.160.19.14`
+- Diretorio: `/opt/security/security/dtrack`
 - Docker: instalado
 - Docker Compose: instalado
 - Dependency-Track API: saudavel
@@ -29,7 +29,7 @@ As portas foram publicadas apenas em loopback no servidor central:
 Isso evita exposicao direta na rede. Para acessar a partir da estacao de trabalho:
 
 ```bash
-ssh -L 8080:127.0.0.1:8080 -L 8081:127.0.0.1:8081 root@192.168.1.22
+ssh -L 8080:127.0.0.1:8080 -L 8081:127.0.0.1:8081 root@200.160.19.14
 ```
 
 Depois abrir:
@@ -58,14 +58,14 @@ A partir da interface administrativa:
 5. Configurar no servidor central:
 
 ```bash
-cd /opt/security
+cd /opt/security/security
 ./dtrack/configure_api_key.sh 'cole-a-api-key-aqui'
 ```
 
 O arquivo gerado sera:
 
 ```text
-/opt/security/config/dependency-track.env
+/opt/security/security/config/dependency-track.env
 ```
 
 com permissao `600`.
@@ -85,7 +85,7 @@ Recomendacao:
 Comandos usados:
 
 ```bash
-cd /opt/security/dtrack
+cd /opt/security/security/dtrack
 docker compose ps
 curl -fsS http://127.0.0.1:8081/api/version
 docker stats --no-stream dtrack-apiserver dtrack-frontend dtrack-postgres

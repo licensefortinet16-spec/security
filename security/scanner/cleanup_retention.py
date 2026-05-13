@@ -13,6 +13,7 @@ DEFAULTS = {
     "reports_days": 365,
     "sbom_days": 365,
     "trivy_json_days": 180,
+    "code_json_days": 180,
     "inventory_days": 180,
     "history_days": 730,
     "metrics_days": 180,
@@ -111,7 +112,7 @@ def prune_unused_images(root):
 
 def main():
     parser = argparse.ArgumentParser(description="Apply retention policy for Container Security Monitor outputs.")
-    parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security"))
+    parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security/security"))
     args = parser.parse_args()
     root = Path(args.root)
     policy = load_policy(root / "config" / "retention_policy.yml")
@@ -128,6 +129,8 @@ def main():
     })
     deleted["sbom"] = delete_old_files(output / "sbom", policy["sbom_days"])
     deleted["trivy"] = delete_old_files(output / "trivy", policy["trivy_json_days"])
+    deleted["code"] = delete_old_files(output / "code", policy["code_json_days"], {"code_summary_latest.json"})
+    deleted["code_history"] = delete_old_files(output / "code-history", policy["code_json_days"], {"code_history_latest.json"})
     deleted["inventory"] = delete_old_files(output / "inventory", policy["inventory_days"])
     deleted["history"] = delete_old_files(output / "history", policy["history_days"], {"risk_scores_latest.json"})
     deleted["metrics"] = delete_old_files(output / "metrics", policy["metrics_days"], {

@@ -132,7 +132,7 @@ def sanitize_error(value):
 
 def main():
     parser = argparse.ArgumentParser(description="Upload CycloneDX SBOMs to Dependency-Track.")
-    parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security"))
+    parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security/security"))
     parser.add_argument("--run-id", default=os.environ.get("RUN_ID") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     parser.add_argument("--timeout", type=int, default=60)
     args = parser.parse_args()

@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="${SECURITY_ROOT:-/opt/security}"
-TRIVY_BASE_URL="${TRIVY_BASE_URL:-http://127.0.0.1:8082}"
-TRIVY_API_TOKEN="${TRIVY_API_TOKEN:-trivy-local-token-20260510}"
+ROOT_DIR="${SECURITY_ROOT:-/opt/security/security}"
+TRIVY_BASE_URL="${TRIVY_BASE_URL:-http://trivy:8082}"
 
 cd "$ROOT_DIR/dtrack"
+
+if [ -f .env ]; then
+  set -a
+  . ./.env
+  set +a
+fi
+
+TRIVY_API_TOKEN="${TRIVY_API_TOKEN:-}"
+if [ -z "$TRIVY_API_TOKEN" ]; then
+  echo "TRIVY_API_TOKEN is not set; run ./generate_env.sh or set it in $ROOT_DIR/dtrack/.env"
+  exit 2
+fi
 
 tmp_dir="$(mktemp -d)"
 cleanup() {

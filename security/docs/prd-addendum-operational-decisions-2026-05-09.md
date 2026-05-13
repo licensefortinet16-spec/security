@@ -8,11 +8,11 @@ Este addendum complementa o PRD original com decisoes de execucao para o ambient
 
 O scanner deve rodar no servidor central:
 
-- Servidor executor: `192.168.1.22`
-- Diretorio de trabalho: `/opt/security`
-- Host alvo piloto: `192.168.1.30`
+- Servidor executor: `200.160.19.14`
+- Diretorio de trabalho: `/opt/security/security`
+- Host alvo piloto: `200.160.19.2`
 
-Todo processamento deve ocorrer em `192.168.1.22`, incluindo:
+Todo processamento deve ocorrer em `200.160.19.14`, incluindo:
 
 - orquestracao do scan;
 - execucao do Trivy;
@@ -27,7 +27,7 @@ Todo processamento deve ocorrer em `192.168.1.22`, incluindo:
 
 ## 2. Restricao no servidor de clientes
 
-O servidor `192.168.1.30`, por hospedar clientes, nao deve executar componentes da solucao.
+O servidor `200.160.19.2`, por hospedar clientes, nao deve executar componentes da solucao.
 
 Nao permitido no alvo:
 
@@ -47,7 +47,7 @@ Permitido no alvo:
 
 ## 3. Implicacao para scan de imagens
 
-Como o Trivy roda somente em `192.168.1.22`, o scanner central precisa conseguir acessar as imagens por uma destas formas:
+Como o Trivy roda somente em `200.160.19.14`, o scanner central precisa conseguir acessar as imagens por uma destas formas:
 
 - registry publico;
 - registry privado com credenciais configuradas no servidor central;
@@ -56,7 +56,7 @@ Como o Trivy roda somente em `192.168.1.22`, o scanner central precisa conseguir
 
 Regra padrao:
 
-- Se uma imagem existir somente localmente no `192.168.1.30` e nao puder ser obtida pelo `192.168.1.22`, o scan dessa imagem deve falhar de forma tratada com status `image_unavailable_for_central_scan`.
+- Se uma imagem existir somente localmente no `200.160.19.2` e nao puder ser obtida pelo `200.160.19.14`, o scan dessa imagem deve falhar de forma tratada com status `image_unavailable_for_central_scan`.
 - A solucao nao deve contornar essa falha executando Trivy no alvo.
 
 ## 4. Politica de falhas aceitaveis
@@ -93,3 +93,19 @@ A regra backend-only permanece obrigatoria:
 - frontend nao acessa SSH, Docker, Trivy, SBOM bruto sensivel ou secrets;
 - frontend nao calcula score nem severidade;
 - qualquer logica sensivel fica restrita ao backend no servidor central.
+
+## 6. Agenda configuravel de scans
+
+O painel autenticado expoe `/settings` para configurar a agenda do ciclo completo de scan. A configuracao gravada em `/opt/security/security/config/scan_schedule.json` atualiza o timer `container-security-scan.timer` via systemd.
+
+A agenda atual do piloto e diaria as 22:00 no fuso local do servidor central:
+
+```text
+OnCalendar=*-*-* 22:00:00
+```
+
+O botao de scan manual permanece disponivel na mesma tela para execucao pontual sem alterar a agenda.
+
+## 7. Scan de codigo
+
+A visao `/reports/code` representa achados de codigo-fonte e secrets. O fluxo copia os diretorios de clientes para o servidor central e executa Semgrep e verificacoes PHP leves. O Trivy fica restrito a `secret,misconfig` neste fluxo para evitar que CVEs de lockfiles e dependencias sejam confundidas com vulnerabilidades de codigo.

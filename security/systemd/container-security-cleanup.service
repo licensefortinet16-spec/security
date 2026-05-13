@@ -3,8 +3,16 @@ Description=Container Security Monitor retention cleanup
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/security
-Environment=SECURITY_ROOT=/opt/security
-ExecStart=/usr/bin/python3 /opt/security/scanner/cleanup_retention.py --root /opt/security
+WorkingDirectory=/opt/security/security
+Environment=SECURITY_ROOT=/opt/security/security
+ExecStart=/usr/bin/python3 /opt/security/security/scanner/cleanup_retention.py --root /opt/security/security
 User=root
 Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true

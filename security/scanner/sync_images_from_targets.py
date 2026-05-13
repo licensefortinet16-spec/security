@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -10,6 +11,8 @@ from pathlib import Path
 
 
 IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,255}$")
+SSH_IDENTITY_FILE = Path(os.environ.get("SECURITY_SSH_IDENTITY_FILE", "/root/.ssh/id_ed25519"))
+SSH_KNOWN_HOSTS_FILE = Path(os.environ.get("SECURITY_SSH_KNOWN_HOSTS_FILE", "/opt/security/security/output/ssh/known_hosts"))
 
 
 def utc_now():
@@ -36,9 +39,31 @@ def safe_image_ref(image):
     return bool(image and IMAGE_REF_RE.match(image))
 
 
-def sync_image(host, image, timeout):
+def remote_docker_save_command(row):
+    image = shlex.quote(row["image"])
+    context = row.get("docker_context") or "default"
+    endpoint = row.get("docker_endpoint_host")
+    if endpoint:
+        return f"DOCKER_HOST={shlex.quote(endpoint)} docker save {image}"
+    if context and context != "default":
+        return f"docker --context {shlex.quote(context)} save {image}"
+    return f"docker save {image}"
+
+
+def wrap_remote_user(command, user):
+    if not user or user == "root":
+        return command
+    return f"su -s /bin/bash -c {shlex.quote(command)} {shlex.quote(user)}"
+
+
+def sync_image(row, timeout):
+    host = row["host"]
+    image = row["image"]
     user = host.get("ssh_user", "root")
     remote = f"{user}@{host['ip']}"
+    docker_owner = row.get("docker_context_owner") or "root"
+    docker_command = wrap_remote_user(remote_docker_save_command(row), docker_owner)
+    SSH_KNOWN_HOSTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     ssh_cmd = [
         "ssh",
         "-o",
@@ -46,11 +71,17 @@ def sync_image(host, image, timeout):
         "-o",
         "ConnectTimeout=8",
         "-o",
+        f"UserKnownHostsFile={SSH_KNOWN_HOSTS_FILE}",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+        "-o",
         "StrictHostKeyChecking=accept-new",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-i",
+        str(SSH_IDENTITY_FILE),
         remote,
-        "docker",
-        "save",
-        image,
+        docker_command,
     ]
     load_cmd = ["docker", "load"]
 
@@ -95,22 +126,35 @@ def sanitize(value):
 def image_hosts(inventory):
     rows = []
     for host_result in inventory.get("hosts", []):
-        if host_result.get("status") != "success":
+        if host_result.get("status") not in {"success", "partial_success"}:
             continue
         host = host_result.get("host") or {}
         seen = set()
         for container in host_result.get("containers", []):
             image = container.get("image")
-            if not image or image in seen:
+            dedupe_key = (
+                image,
+                container.get("docker_context") or "default",
+                container.get("docker_endpoint_host") or "",
+                container.get("docker_context_owner") or "root",
+            )
+            if not image or dedupe_key in seen:
                 continue
-            seen.add(image)
-            rows.append({"host": host, "image": image, "container": container.get("name")})
+            seen.add(dedupe_key)
+            rows.append({
+                "host": host,
+                "image": image,
+                "container": container.get("name"),
+                "docker_context": container.get("docker_context") or "default",
+                "docker_context_owner": container.get("docker_context_owner") or "root",
+                "docker_endpoint_host": container.get("docker_endpoint_host"),
+            })
     return rows
 
 
 def main():
     parser = argparse.ArgumentParser(description="Synchronize target Docker images to central server using docker save over SSH.")
-    parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security"))
+    parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security/security"))
     parser.add_argument("--run-id", default=os.environ.get("RUN_ID") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     parser.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args()
@@ -145,6 +189,8 @@ def main():
             "host_name": host.get("name"),
             "host_ip": host.get("ip"),
             "container": row.get("container"),
+            "docker_context": row.get("docker_context"),
+            "docker_context_owner": row.get("docker_context_owner"),
         }
         if not safe_image_ref(image):
             result["status"] = "skipped_invalid_image_ref"
@@ -159,8 +205,8 @@ def main():
             print(f"image_sync image={image} status=skipped_existing")
             continue
 
-        print(f"image_sync image={image} host={host.get('ip')} status=syncing", flush=True)
-        sync_result = sync_image(host, image, args.timeout)
+        print(f"image_sync image={image} host={host.get('ip')} context={row.get('docker_context')} status=syncing", flush=True)
+        sync_result = sync_image(row, args.timeout)
         result.update(sync_result)
         if sync_result["status"] == "synced":
             output["synced"] += 1

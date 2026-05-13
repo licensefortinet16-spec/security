@@ -1,0 +1,41 @@
+[[rules]]
+type = "secret"
+severity = "*"
+classification = "critico"
+sla_days = 1
+
+[[rules]]
+type = "lfi"
+severity = "HIGH"
+classification = "alto"
+sla_days = 7
+
+[[rules]]
+type = "sast"
+severity = "HIGH"
+classification = "alto"
+sla_days = 7
+
+[[rules]]
+type = "vulnerability"
+severity = "CRITICAL"
+classification = "critico"
+sla_days = 7
+
+[[rules]]
+type = "vulnerability"
+severity = "HIGH"
+classification = "alto"
+sla_days = 15
+
+[[rules]]
+type = "*"
+severity = "MEDIUM"
+classification = "medio"
+sla_days = 30
+
+[[rules]]
+type = "*"
+severity = "LOW"
+classification = "baixo"
+sla_days = 90

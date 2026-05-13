@@ -164,7 +164,7 @@ def collect_once(root, run_id, dtrack_url, api_key, timeout, insecure_tls):
 
 def main():
     parser = argparse.ArgumentParser(description="Check Dependency-Track vulnerability correlation after SBOM upload.")
-    parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security"))
+    parser.add_argument("--root", default=os.environ.get("SECURITY_ROOT", "/opt/security/security"))
     parser.add_argument("--run-id", default=os.environ.get("RUN_ID") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--poll-seconds", type=int, default=0)
@@ -223,8 +223,24 @@ def main():
             time.sleep(max(args.poll_interval, 1))
 
     if last_error:
-        summary["status"] = "failed"
-        summary["error"] = last_error
+        if last_error == "HTTP 403":
+            summary["status"] = "permission_limited"
+            summary["error"] = last_error
+            summary["recommendation"] = (
+                "A API key atual autentica, mas nao tem permissao para consultar projetos/metrica. "
+                "Crie ou ajuste uma API key no Dependency-Track com permissoes de leitura de portfolio, "
+                "projetos, componentes, vulnerabilidades e metricas do projeto."
+            )
+            summary["required_permissions"] = [
+                "VIEW_PORTFOLIO",
+                "VIEW_PROJECT",
+                "VIEW_VULNERABILITY",
+                "VIEW_POLICY_VIOLATION",
+                "PORTFOLIO_MANAGEMENT_READ",
+            ]
+        else:
+            summary["status"] = "failed"
+            summary["error"] = last_error
     else:
         totals = summary.get("totals") or {}
         if not totals.get("expected_projects"):

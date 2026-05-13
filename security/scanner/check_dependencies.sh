@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-ROOT_DIR="${SECURITY_ROOT:-/opt/security}"
+ROOT_DIR="${SECURITY_ROOT:-/opt/security/security}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 LOG_DIR="$ROOT_DIR/output/logs"
 LOG_FILE="$LOG_DIR/dependencies_$RUN_ID.log"

@@ -5,15 +5,27 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/security
-Environment=SECURITY_ROOT=/opt/security
-Environment=SECURITY_STATUS_BIND=192.168.1.22
+WorkingDirectory=/opt/security/security
+Environment=SECURITY_ROOT=/opt/security/security
+Environment=SECURITY_SSH_IDENTITY_FILE=/opt/security/security/output/ssh/id_ed25519
+Environment=SECURITY_PUBLIC_HOST=200.160.19.14
+Environment=SECURITY_STATUS_BIND=200.160.19.14
 Environment=SECURITY_STATUS_PORT=8090
-ExecStart=/usr/bin/python3 /opt/security/server/security_status_server.py
+EnvironmentFile=-/etc/container-security-monitor/status.env
+Environment=SECURITY_STATUS_SESSION_FILE=/etc/container-security-monitor/status-session.secret
+ExecStart=/usr/bin/python3 /opt/security/security/server/security_status_server.py
 Restart=on-failure
 RestartSec=5
 User=root
 Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target

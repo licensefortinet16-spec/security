@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="${SECURITY_ROOT:-/opt/security}"
+ROOT_DIR="${SECURITY_ROOT:-/opt/security/security}"
 cd "$ROOT_DIR/dtrack"
 
 if [ ! -f .env ]; then

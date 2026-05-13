@@ -1,14 +1,14 @@
 # Apresentacao do Sistema - Container Security Monitor
 
-Data de referencia: 2026-05-10  
-Ambiente piloto: `192.168.1.22:/opt/security`  
-Host monitorado: `192.168.1.30`
+Data de referencia: 2026-05-10
+Ambiente piloto: `200.160.19.14:/opt/security/security`
+Host monitorado: `200.160.19.2`
 
 ## 1. Resumo executivo
 
 O Container Security Monitor e uma plataforma centralizada para visibilidade de risco em ambientes Docker e OpenPanel. A solucao coleta inventario remoto, sincroniza imagens de forma controlada, executa Trivy somente no servidor central, gera SBOM CycloneDX, envia os SBOMs ao Dependency-Track, calcula score de risco, publica metricas e entrega relatorios tecnico e gerencial.
 
-O ponto principal de seguranca da arquitetura e que todo processamento ocorre no backend, no servidor `192.168.1.22`. O host que hospeda clientes nao recebe agente, Trivy, container auxiliar, job agendado ou processamento local da solucao.
+O ponto principal de seguranca da arquitetura e que todo processamento ocorre no backend, no servidor `200.160.19.14`. O host que hospeda clientes nao recebe agente, Trivy, container auxiliar, job agendado ou processamento local da solucao.
 
 ## 2. Problema resolvido
 
@@ -43,7 +43,7 @@ Usuario / SOC
 Status UI / Relatorios / Grafana
    |
    v
-Servidor central 192.168.1.22
+Servidor central 200.160.19.14
    |-- scanner e orquestracao
    |-- inventario Docker remoto via SSH
    |-- docker save controlado para imagens locais
@@ -57,7 +57,7 @@ Servidor central 192.168.1.22
    |
    | SSH somente para coleta
    v
-Host alvo 192.168.1.30
+Host alvo 200.160.19.2
 ```
 
 ## 5. Componentes
@@ -80,7 +80,7 @@ Host alvo 192.168.1.30
 2. O servidor central testa acesso SSH ao host monitorado.
 3. O inventario Docker e coletado remotamente.
 4. Imagens locais podem ser sincronizadas para o servidor central por `docker save`.
-5. Trivy roda localmente no `192.168.1.22`.
+5. Trivy roda localmente no `200.160.19.14`.
 6. SBOM CycloneDX e gerado por imagem.
 7. SBOMs sao enviados ao Dependency-Track.
 8. Dependency-Track correlaciona componentes e vulnerabilidades.
@@ -135,14 +135,13 @@ As regras sao apenas informativas. Elas nao bloqueiam containers, deploys ou exe
 
 | Recurso | URL |
 | --- | --- |
-| Status UI | `http://192.168.1.22:8090` |
-| Relatorio gerencial HTML | `http://192.168.1.22:8090/reports/executive` |
-| Relatorio gerencial PDF | `http://192.168.1.22:8090/reports/executive.pdf` |
-| Relatorio tecnico geral | `http://192.168.1.22:8090/reports/technical` |
-| Grafana | `http://192.168.1.22:3000` |
-| Prometheus | `http://192.168.1.22:9090` |
-| Dependency-Track | `http://192.168.1.22:8080` |
-| Dependency-Track API | `http://192.168.1.22:8081` |
+| Status UI | `http://200.160.19.14:8090` |
+| Relatorio gerencial HTML | `http://200.160.19.14:8090/reports/executive` |
+| Relatorio gerencial PDF | `http://200.160.19.14:8090/reports/executive.pdf` |
+| Relatorio tecnico geral | `http://200.160.19.14:8090/reports/technical` |
+| Metrics | `output/metrics/container_security_latest.prom` |
+| Dependency-Track | `http://200.160.19.14:8080` |
+| Dependency-Track API | `http://200.160.19.14:8081` |
 
 O relatorio tecnico possui menu lateral com grupos expansives:
 
@@ -169,7 +168,7 @@ Mensagem central:
 Abrir:
 
 ```text
-http://192.168.1.22:8090
+http://200.160.19.14:8090
 ```
 
 Mostrar:
@@ -185,7 +184,7 @@ Mostrar:
 Abrir:
 
 ```text
-http://192.168.1.22:8090/reports/executive
+http://200.160.19.14:8090/reports/executive
 ```
 
 Mostrar:
@@ -200,7 +199,7 @@ Mostrar:
 Em seguida abrir:
 
 ```text
-http://192.168.1.22:8090/reports/executive.pdf
+http://200.160.19.14:8090/reports/executive.pdf
 ```
 
 Ponto de fala:
@@ -212,7 +211,7 @@ Ponto de fala:
 Abrir:
 
 ```text
-http://192.168.1.22:8090/reports/technical
+http://200.160.19.14:8090/reports/technical
 ```
 
 Mostrar:
@@ -228,7 +227,7 @@ Mostrar:
 Abrir um container, por exemplo:
 
 ```text
-http://192.168.1.22:8090/reports/technical/containers/radius-automated-zap-mailpit-axllent-mailpit-latest
+http://200.160.19.14:8090/reports/technical/containers/radius-automated-zap-mailpit-axllent-mailpit-latest
 ```
 
 Ponto de fala:
@@ -240,7 +239,7 @@ Ponto de fala:
 Abrir:
 
 ```text
-http://192.168.1.22:3000
+Metrics are exposed through the project output files and status UI only.
 ```
 
 Mostrar:
@@ -256,7 +255,7 @@ Mostrar:
 Abrir:
 
 ```text
-http://192.168.1.22:8080
+http://200.160.19.14:8080
 ```
 
 Mostrar:
@@ -307,4 +306,3 @@ Ponto de fala:
 ## 14. Mensagem final para gestao
 
 O sistema reduz a falta de visibilidade em ambientes Docker/OpenPanel e cria uma rotina centralizada para identificar, priorizar e acompanhar riscos. A solucao evita instalar componentes no host de clientes, concentra o processamento no backend e entrega informacao em tres niveis: executivo, tecnico e operacional/SOC.
-
